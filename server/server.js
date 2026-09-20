@@ -7,7 +7,7 @@
  * on any normal HTTPS domain.
  *
  * Only 2 npm dependencies: express, cors. Everything else (env
- * loading, JSON file storage, the OpenAI API call) uses Node's
+ * loading, JSON file storage, the Gemini API call) uses Node's
  * built-ins (Node 18+ has global fetch).
  *
  * THIS FILE WAS WRITTEN BUT NOT RUN in the environment that produced
@@ -38,8 +38,8 @@ const cors = require('cors');
 
 const PORT = process.env.PORT || 8787;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const AI_API_KEY = process.env.AI_API_KEY || '';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-5-mini';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const AUTH_SECRET = process.env.AUTH_SECRET || '';
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -125,30 +125,28 @@ app.post('/api/db/:collection/:id/acquire', (req, res) => {
 });
 
 // ---------------------------- AI ROUTE ----------------------------
-// Server-side OpenAI proxy — the front-end NEVER sees AI_API_KEY.
+// Server-side Gemini proxy — the front-end NEVER sees GEMINI_API_KEY.
 app.post('/api/ai', async (req, res) => {
-  if (!AI_API_KEY) {
-    return res.status(500).json({ error: 'AI_API_KEY is not configured on the server (.env)' });
+  if (!GEMINI_API_KEY) {
+    return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server (.env)' });
   }
   const { prompt, json, modelTier } = req.body || {};
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
-  const model = AI_MODEL;
+  const model = GEMINI_MODEL;
   try {
     const inputText = json && !/\bjson\b/i.test(String(prompt))
       ? `Return the result as valid JSON.\n\n${String(prompt)}`
       : String(prompt);
     const requestBody = {
-      model,
-      input: [{ role: 'user', content: [{ type: 'input_text', text: inputText }] }],
-      max_output_tokens: 2000,
+      contents: [{ role: 'user', parts: [{ text: inputText }] }],
+      generationConfig: { maxOutputTokens: 2000 },
     };
-    if (json) requestBody.text = { format: { type: 'json_object' } };
+    if (json) requestBody.generationConfig.responseMimeType = 'application/json';
 
-    const r = await fetch('https://api.openai.com/v1/responses', {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${AI_API_KEY}`,
       },
       body: JSON.stringify(requestBody),
     });
@@ -157,14 +155,14 @@ app.post('/api/ai', async (req, res) => {
       let detail = errText;
       try {
         const providerError = JSON.parse(errText);
-        detail = providerError.error?.message || providerError.error || errText;
+        detail = providerError.error?.message || providerError.error?.status || providerError.error || errText;
       } catch (e) {}
       return res.status(502).json({ error: 'AI provider error', detail: String(detail) });
     }
     const data = await r.json();
-    const text = data.output_text || (data.output || [])
-      .flatMap(item => item.content || [])
-      .map(content => content.text || '')
+    const text = (data.candidates || [])
+      .flatMap(candidate => candidate.content?.parts || [])
+      .map(part => part.text || '')
       .join('\n');
     if (!text) return res.status(502).json({ error: 'AI returned an empty response' });
     if (json) {
@@ -189,6 +187,6 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Screenly server running on http://localhost:${PORT}`);
-  if (!AI_API_KEY) console.warn('⚠️  AI_API_KEY not set — AI screening will not work until you set it in .env');
+  if (!GEMINI_API_KEY) console.warn('⚠️  GEMINI_API_KEY not set — AI screening will not work until you set it in .env');
   if (!AUTH_SECRET) console.warn('⚠️  AUTH_SECRET not set — /api routes are open. Fine for local dev only.');
 });

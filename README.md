@@ -29,7 +29,7 @@ Inside `www/index.html`, `initCapabilities()` now checks for `window.claude`:
 ```bash
 cd screenly-app
 cp .env.example .env
-# edit .env: at minimum set AI_API_KEY to a real Anthropic API key
+# edit .env: at minimum set GEMINI_API_KEY to a Google Gemini API key
 cd server
 npm install
 npm start
@@ -121,7 +121,7 @@ and to `ios/App/App/Info.plist`:
 
 ## Security notes (Step 12/13 from the request)
 
-- `AI_API_KEY` lives only in `.env` on the server — the browser/app
+- `GEMINI_API_KEY` lives only in `.env` on the server — the browser/app
   never sees it (`server.js`'s `/api/ai` route is the only thing that
   reads it).
 - Set `AUTH_SECRET` in `.env` for anything beyond local testing; every
