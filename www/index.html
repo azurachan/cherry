@@ -1003,8 +1003,7 @@ Balas HANYA array JSON berisi objek: [{"section": string, "text": string}, ...]`
 async function aiAnalyzeInterview(job, candidateName, qaPairs){
   const answered = qaPairs.filter(q=>q.answer && q.answer.trim());
   if(!aiAvailable){
-    return { overallScore: 0, breakdown:{communication:0, relevantExperience:0, problemSolving:0, roleUnderstanding:0, motivation:0, availability:0},
-      summary:'Insufficient evidence: analisis AI tidak tersedia untuk menilai jawaban interview secara evidence-based.', strengths:[], concerns:[], keyAnswers:[], followUpQuestions:[] };
+    throw new Error('AI tidak tersedia untuk analisis interview.');
   }
   try{
     const prompt = `Anda adalah asisten rekrutmen yang objektif, menganalisis transkrip interview untuk recruiter manusia yang membuat keputusan akhir — Anda tidak pernah memutuskan.
@@ -1032,10 +1031,7 @@ Balas HANYA dengan objek JSON dengan key persis berikut:
         motivation:clamp100(data.breakdown?.motivation), availability:clamp100(data.breakdown?.availability) },
       summary:data.summary||'', strengths:Array.isArray(data.strengths)?data.strengths:[], concerns:Array.isArray(data.concerns)?data.concerns:[],
       keyAnswers:Array.isArray(data.keyAnswers)?data.keyAnswers:[], followUpQuestions:Array.isArray(data.followUpQuestions)?data.followUpQuestions:[] };
-  }catch(e){ console.warn('Analisis interview gagal', e); toast('Analisis AI sedang tidak tersedia — menampilkan ringkasan dasar.', 'error');
-    return { overallScore: 0, breakdown:{communication:0, relevantExperience:0, problemSolving:0, roleUnderstanding:0, motivation:0, availability:0},
-      summary:'Insufficient evidence: analisis interview gagal tersedia dan perlu ditinjau recruiter secara manual.', strengths:[], concerns:[], keyAnswers:[], followUpQuestions:[] };
-  }
+  }catch(e){ console.warn('Analisis interview gagal', e); throw e; }
 }
 async function aiDraftMessage(kind, job, candidate){
   if(!aiAvailable) return null;
@@ -1870,7 +1866,8 @@ async function startScreening(){
     clearInterval(stepTimer);
     console.error(e);
     box.innerHTML = `<div class="flex items-start gap-2 text-coral-600 text-sm font-semibold bg-coral-50 border border-coral-200 rounded-2xl p-3">${icon('alert','w-4 h-4 shrink-0 mt-0.5')} <span>Analisis AI gagal: ${esc(e.message||'error tidak diketahui')}. Silakan coba lagi.</span></div>`;
-    document.querySelector('button[onclick="startScreening()"]').disabled = false;
+    const retryButton = document.querySelector('button[onclick="startScreening()"]');
+    if(retryButton){ retryButton.disabled = false; retryButton.textContent = 'Analisis Lagi'; }
   }
 }
 async function addNotification(text, link){
@@ -1984,8 +1981,9 @@ function tabCandidateInsight(c, job){
     <div class="card rounded-3xl p-6 shadow-softer flex flex-wrap items-center justify-between gap-4">
       <div><h2 class="font-display font-bold text-lg">CANDIDATE INSIGHT</h2><p class="text-sm text-muted">Asisten recruiter berbasis evidence, bukan keputusan otomatis.</p></div>
       <div class="text-center"><p class="text-xs text-muted font-bold">Overall Fit</p><p class="font-display text-3xl font-extrabold">${i.overallFit==null?'Insufficient evidence':i.overallFit+'%'}</p></div>
-      <button id="insightBtn_${c.id}" onclick="generateCandidateInsight('${c.id}')" class="px-4 py-2.5 rounded-xl bg-ink-900 text-white text-sm font-bold">${c.insight?'Perbarui Insight AI':'Analisis Candidate Insight'}</button>
+      <button id="insightBtn_${c.id}" onclick="generateCandidateInsight('${c.id}')" class="px-4 py-2.5 rounded-xl bg-ink-900 text-white text-sm font-bold">${c.insightError?'Analisis Lagi':c.insight?'Perbarui Insight AI':'Analisis Candidate Insight'}</button>
     </div>
+    ${c.insightError?`<div class="text-sm text-coral-600 bg-coral-50 border border-coral-200 rounded-xl p-3">Candidate Insight gagal: ${esc(c.insightError)}</div>`:''}
     ${c.insight?.aiStatus==='analyzed'?`<div class="card rounded-3xl p-6 shadow-softer"><h3 class="font-bold text-sm mb-2">Candidate Overview</h3><p class="text-sm text-ink-700">${esc(i.candidateOverview||i.finalSummary||'Belum ada informasi.')}</p><p class="text-xs text-muted mt-2">${esc(candidateDisplayName(c))} · ${esc(job?.name||'Belum ada posisi')} · ${esc(stageLabel(c.stage))}</p></div>`:''}
     <div class="grid md:grid-cols-3 gap-5">${(i.scores||[]).map(s=>`<div class="card rounded-3xl p-5 shadow-softer"><p class="text-xs text-muted font-bold">${esc(s.label)}</p><p class="font-display text-2xl font-extrabold mt-1">${s.score}%</p></div>`).join('') || `<div class="card rounded-3xl p-5 shadow-softer text-sm text-muted md:col-span-3">Insufficient evidence</div>`}</div>
     <div class="grid md:grid-cols-2 gap-5">
@@ -2015,9 +2013,9 @@ function insightListCard(title, items, color){
 }
 function chatAnalysisView(c, job, chat){
   return `<div class="card rounded-3xl p-6 shadow-softer">
-    <div class="flex items-center justify-between gap-3 mb-2"><div><h3 class="font-display font-bold">Analisis Chat</h3><p class="text-xs text-muted">Analisis hanya mencakup informasi kerja yang tertulis di percakapan.</p></div><button id="chatBtn_${c.id}" onclick="analyzeCandidateChat('${c.id}')" class="px-4 py-2.5 rounded-xl bg-lav-500 text-white text-sm font-bold">${chat?'Perbarui Analisis':'Analisis Chat'}</button></div>
+    <div class="flex items-center justify-between gap-3 mb-2"><div><h3 class="font-display font-bold">Analisis Chat</h3><p class="text-xs text-muted">Analisis hanya mencakup informasi kerja yang tertulis di percakapan.</p></div><button id="chatBtn_${c.id}" onclick="analyzeCandidateChat('${c.id}')" class="px-4 py-2.5 rounded-xl bg-lav-500 text-white text-sm font-bold">${c.chatAnalysisError?'Analisis Lagi':chat?'Perbarui Analisis':'Analisis Chat'}</button></div>
     <textarea id="candidateChat_${c.id}" rows="7" placeholder="Tempel chat recruiter dan kandidat di sini..." class="w-full rounded-xl border border-app px-3.5 py-2.5 text-sm">${esc(c.chatText||'')}</textarea>
-    <div id="chatError_${c.id}" class="hidden mt-3 text-sm text-coral-600 bg-coral-50 border border-coral-200 rounded-xl p-3"></div>
+    <div id="chatError_${c.id}" class="${c.chatAnalysisError?'':'hidden'} mt-3 text-sm text-coral-600 bg-coral-50 border border-coral-200 rounded-xl p-3">${esc(c.chatAnalysisError||'')}</div>
     ${chat?`<div class="grid md:grid-cols-2 gap-5 mt-5">
       ${insightListCard('Communication',chat.communication,'text-coral-600')}
       ${insightListCard('Role Understanding',chat.roleUnderstanding,'text-lav-500')}
@@ -2053,10 +2051,11 @@ async function analyzeCandidateChat(id){
   try{
     if(!aiAvailable) throw new Error('AI tidak tersedia.');
     const analysis=await aiAnalyzeCandidateChat(c,job,chatText);
-    c.chatText=chatText; c.chatAnalysis={...analysis,analyzedAt:Date.now()}; c.lastActivityAt=Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Analisis Chat diperbarui',date:Date.now()});
+    c.chatText=chatText; c.chatAnalysis={...analysis,analyzedAt:Date.now()}; delete c.chatAnalysisError; c.lastActivityAt=Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Analisis Chat diperbarui',date:Date.now()});
     await docSet('candidates',id,c); toast('Analisis Chat selesai.','success'); render();
   }catch(e){
     if(btn){btn.disabled=false;btn.textContent='Coba Lagi';}
+    c.chatAnalysisError=e.message||'Analisis Chat gagal.'; await docSet('candidates',id,c);
     if(errorBox){errorBox.textContent='Analisis Chat gagal: '+(e.message||'error tidak diketahui');errorBox.classList.remove('hidden');}
   }
 }
@@ -2066,9 +2065,13 @@ async function generateCandidateInsight(id){
   if(btn){ btn.disabled=true; btn.textContent='Menganalisis...'; }
   try{
     if(!aiAvailable) throw new Error('AI tidak tersedia.');
-    c.insight = await aiAnalyzeCandidateInsight(c, job); c.lastActivityAt = Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Candidate Insight AI diperbarui',date:Date.now()});
+    c.insight = await aiAnalyzeCandidateInsight(c, job); delete c.insightError; c.lastActivityAt = Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Candidate Insight AI diperbarui',date:Date.now()});
     await docSet('candidates', id, c); toast('Candidate Insight diperbarui.','success'); render();
-  }catch(e){ if(btn){btn.disabled=false;btn.textContent='Coba Lagi';} toast('Candidate Insight gagal: '+(e.message||'error tidak diketahui'),'error'); }
+  }catch(e){
+    c.insightError=e.message||'Candidate Insight gagal.'; await docSet('candidates',id,c);
+    if(btn){btn.disabled=false;btn.textContent='Analisis Lagi';}
+    toast('Candidate Insight gagal: '+(e.message||'error tidak diketahui'),'error'); render();
+  }
 }
 async function moveStage(id, stage){
   const c = getCand(id); c.stage = stage; c.timeline = c.timeline||[]; c.timeline.push({event:'Dipindahkan ke '+stageLabel(stage), date:Date.now()});
@@ -2212,14 +2215,32 @@ function tabScreening(c, job){
 
   <div class="card rounded-3xl p-6 shadow-softer mt-5">
     <h3 class="font-bold text-sm mb-2">Catatan Recruiter</h3>
+    ${s.aiError?`<div class="text-sm text-coral-600 bg-coral-50 border border-coral-200 rounded-xl p-3 mb-3">Analisis CV gagal: ${esc(s.aiError)}</div>`:''}
     <textarea id="screeningNotes" rows="3" class="w-full rounded-xl border border-app px-3.5 py-2.5 text-sm" placeholder="Tambahkan catatan penilaian Anda...">${esc(s.recruiterNotes||'')}</textarea>
     <div class="flex flex-wrap gap-3 mt-4">
+      <button onclick="rerunCandidateScreening('${c.id}')" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-lav-500 text-white text-sm font-bold">${s.aiError?'Analisis Lagi':'Perbarui Analisis'}</button>
       ${btnPrimary('Lanjut ke Interview', `decideCandidate('${c.id}','interview')`,'chevRight')}
       ${btnGhost('Tetap di Review', `decideCandidate('${c.id}','review')`,'clock')}
       <button onclick="decideCandidate('${c.id}','reject')" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl border border-coral-200 text-coral-600 hover:bg-coral-50 text-sm font-bold">${icon('x','w-4 h-4')} Tolak Kandidat</button>
     </div>
     <p class="text-[11px] text-muted mt-3 flex items-center gap-1.5">${icon('info','w-3.5 h-3.5')} AI tidak pernah menolak kandidat secara otomatis — keputusan akhir selalu di tangan Anda.</p>
   </div>`;
+}
+async function rerunCandidateScreening(id){
+  const c=getCand(id); const job=getJob(c?.jobId); if(!c||!job||!c.cvText) return;
+  const button=document.querySelector(`button[onclick="rerunCandidateScreening('${id}')"]`);
+  if(button){button.disabled=true;button.textContent='Menganalisis...';}
+  try{
+    const cvData=await aiExtractCV(c.cvText); const screening=await aiScoreCandidate(cvData,job);
+    c.cvData={...c.cvData,...cvData};
+    if(!isUsableCandidateName(c.displayName||c.name) && isUsableCandidateName(cvData.fullName)){ c.name=cvData.fullName; c.displayName=cvData.fullName; c.nameSource='cv'; }
+    c.screening={...screening, recruiterNotes:c.screening?.recruiterNotes||'', status:c.screening?.status||'pending', source:aiAvailable?'ai':'fallback', aiError:null};
+    c.lastActivityAt=Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'CV Screening diperbarui',date:Date.now()});
+    await docSet('candidates',id,c); toast('Analisis CV diperbarui.','success'); render();
+  }catch(e){
+    c.screening={...(c.screening||{}),aiError:e.message||'Analisis CV gagal.'}; await docSet('candidates',id,c);
+    toast('Analisis CV gagal. Silakan coba lagi.','error'); render();
+  }
 }
 async function rescreenForJob(cid, newJobId){
   const c = getCand(cid); const newJob = getJob(newJobId); if(!c || !newJob) return;
@@ -2351,7 +2372,8 @@ function renderInterviewWorkspace(c, job){
         </div>`).join('')}
       <button onclick="addCustomQuestion('${c.id}')" class="w-full py-3 rounded-2xl border-2 border-dashed border-app text-sm font-bold text-muted hover:border-coral-300 hover:text-coral-600">+ Tambah pertanyaan khusus</button>
 
-      ${!analyzed ? `<button onclick="runInterviewAnalysis('${c.id}')" id="analyzeBtn" class="w-full py-3.5 rounded-2xl bg-lav-500 hover:bg-lav-600 text-white font-bold text-sm shadow-soft flex items-center justify-center gap-2">${icon('sparkle','w-4 h-4')} Analisis Interview</button>` : ''}
+      <div id="interviewError_${c.id}" class="${c.interview.analysisError?'':'hidden'} text-sm text-coral-600 bg-coral-50 border border-coral-200 rounded-2xl p-3">${esc(c.interview.analysisError||'')}</div>
+      <button onclick="runInterviewAnalysis('${c.id}')" id="analyzeBtn" class="w-full py-3.5 rounded-2xl bg-lav-500 hover:bg-lav-600 text-white font-bold text-sm shadow-soft flex items-center justify-center gap-2">${icon('sparkle','w-4 h-4')} ${analyzed?'Perbarui Analisis':'Analisis Interview'}</button>
     </div>
     <div class="space-y-5">
       ${renderPresenceRatingBox(c)}
@@ -2398,12 +2420,20 @@ async function runInterviewAnalysis(cid){
   const c = getCand(cid); const job = getJob(c.jobId);
   const btn = document.getElementById('analyzeBtn'); if(btn){ btn.disabled=true; btn.innerHTML = statusLine('Menganalisis interview...', true); }
   const qaPairs = c.interview.questions.map(q=>({ question:q.text, section:q.section, answer:q.answer||'' }));
-  const analysis = await aiAnalyzeInterview(job, candidateDisplayName(c), qaPairs);
-  c.interview.status = 'analyzed'; c.interview.analysis = analysis;
-  c.timeline = c.timeline||[]; c.timeline.push({event:'Interview Selesai', date:Date.now()});
+  c.interview = { ...c.interview, status:c.interview.analysis?'analyzed':'in_progress' };
   await docSet('candidates', cid, c);
-  toast('Analisis interview siap.','success');
-  render();
+  try{
+    const analysis = await aiAnalyzeInterview(job, candidateDisplayName(c), qaPairs);
+    c.interview.status = 'analyzed'; c.interview.analysis = analysis; delete c.interview.analysisError;
+    c.timeline = c.timeline||[]; c.timeline.push({event:'Interview Dianalisis', date:Date.now()});
+    await docSet('candidates', cid, c);
+    toast('Analisis interview siap.','success'); render();
+  }catch(e){
+    c.interview.status = c.interview.analysis ? 'analyzed' : 'in_progress';
+    c.interview.analysisError = e.message||'Analisis interview gagal. Silakan coba lagi.';
+    await docSet('candidates', cid, c);
+    toast('Analisis interview gagal. Jawaban tetap tersimpan.','error'); render();
+  }
 }
 function interviewAnalysisCard(c){
   const a = c.interview.analysis; const sc = scoreColor(a.overallScore);
@@ -2557,7 +2587,8 @@ function tabLiveTalent(c, job){
       </div>
       <div class="card rounded-3xl p-6 shadow-softer">
         <div class="flex items-center justify-between mb-1"><h3 class="font-bold text-sm">Presentation Assessment</h3>
-          <button onclick="aiPresentationNote('${c.id}')" class="text-xs font-bold text-lav-500 flex items-center gap-1">${icon('sparkle','w-3.5 h-3.5')} Minta kesan awal AI</button></div>
+          <button onclick="aiPresentationNote('${c.id}')" class="text-xs font-bold text-lav-500 flex items-center gap-1">${icon('sparkle','w-3.5 h-3.5')} ${t.presentation.aiError?'Analisis Lagi':t.presentation.aiNotes?'Perbarui Analisis':'Minta kesan awal AI'}</button></div>
+        ${t.presentation.aiError?`<div class="text-xs text-coral-600 bg-coral-50 border border-coral-200 rounded-xl p-3 mb-3">Analisis Live Talent gagal: ${esc(t.presentation.aiError)}</div>`:''}
         <p class="text-[11px] text-muted mb-3">Catat faktor presentasi yang relevan dengan pekerjaan dan dapat diamati, seperti kejelasan komunikasi, respons terhadap arahan, dan kesiapan teknis. Jangan menilai daya tarik, bentuk tubuh, ras, usia, atau karakteristik pribadi lainnya.</p>
         ${t.presentation.aiNotes?`<div class="bg-lav-50 border border-lav-200 rounded-xl p-3 mb-3 text-xs"><b class="text-lav-500">Kesan awal AI (berdasarkan catatan yang ada):</b> ${esc(t.presentation.aiNotes)}</div>`:''}
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
@@ -2645,20 +2676,18 @@ function buildTestCamAssessment(t){
 }
 async function aiPresentationNote(cid){
   const c = getCand(cid); const job = getJob(c.jobId);
-  toast('Meminta kesan awal AI...');
-  let note = '';
-  if(aiAvailable){
-    try{
-      const prompt = `${AI_LANG_RULE}\nBerdasarkan catatan berikut tentang seorang kandidat talent (bukan CV formal), tulis 1-2 kalimat "kesan awal presentasi publik" yang OBSERVATIF dan netral (grooming/kesiapan tampil/gaya komunikasi) — JANGAN pernah menilai kecantikan, berat badan, atau menyimpulkan hal yang tidak disebutkan.\n\nCatatan: ${c.cvText||'(tidak ada catatan)'}\n\nBalas hanya kalimatnya, tanpa embel-embel.`;
-      const res = await sampleApi(prompt, {modelTier:'quick', cache:false});
-      note = res.text?.trim() || '';
-    }catch(e){}
+  const button=document.querySelector(`button[onclick="aiPresentationNote('${cid}')"]`); if(button){button.disabled=true;button.textContent='Menganalisis...';}
+  try{
+    if(!aiAvailable) throw new Error('AI tidak tersedia.');
+    const prompt = `${AI_LANG_RULE}\nBerdasarkan catatan berikut tentang seorang kandidat talent (bukan CV formal), tulis 1-2 kalimat "kesan awal presentasi publik" yang OBSERVATIF dan netral (kesiapan tampil/gaya komunikasi/respons terhadap arahan) — JANGAN pernah menilai kecantikan, berat badan, atau menyimpulkan hal yang tidak disebutkan.\n\nCatatan: ${c.cvText||'(tidak ada catatan)'}\n\nBalas hanya kalimatnya, tanpa embel-embel.`;
+    const res = await sampleApi(prompt, {modelTier:'quick', cache:false}); const note=res.text?.trim();
+    if(!note) throw new Error('AI returned an empty response');
+    c.talent = c.talent || emptyTalentAssessment(); c.talent.presentation.aiNotes=note; delete c.talent.presentation.aiError;
+    await docSet('candidates', cid, c); toast('Analisis Live Talent diperbarui.','success'); render();
+  }catch(e){
+    c.talent = c.talent || emptyTalentAssessment(); c.talent.presentation.aiError=e.message||'Analisis Live Talent gagal.';
+    await docSet('candidates', cid, c); toast('Analisis Live Talent gagal.','error'); render();
   }
-  if(!note) note = 'Belum cukup informasi untuk kesan awal otomatis — silakan isi penilaian presentasi secara manual.';
-  c.talent = c.talent || emptyTalentAssessment();
-  c.talent.presentation.aiNotes = note;
-  await docSet('candidates', cid, c);
-  render();
 }
 async function saveTalentAssessment(cid){
   const c = getCand(cid); const job = getJob(c.jobId);
