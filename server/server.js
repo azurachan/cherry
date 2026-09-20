@@ -40,6 +40,8 @@ const PORT = process.env.PORT || 8787;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const GEMINI_MAX_RETRIES = 3;
+const GEMINI_RETRY_BASE_MS = 250;
 const AUTH_SECRET = process.env.AUTH_SECRET || '';
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -126,6 +128,49 @@ app.post('/api/db/:collection/:id/acquire', (req, res) => {
 
 // ---------------------------- AI ROUTE ----------------------------
 // Server-side Gemini proxy — the front-end NEVER sees GEMINI_API_KEY.
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableGeminiFailure(status, detail) {
+  if ([429, 500, 502, 503, 504].includes(status)) return true;
+  return /high demand|temporar|service unavailable|unavailable|overloaded|try again later|rate limit/i.test(String(detail||''));
+}
+
+function parseGeminiError(body) {
+  let detail = body;
+  try {
+    const providerError = JSON.parse(body);
+    detail = providerError.error?.message || providerError.error?.status || providerError.error || body;
+  } catch (e) {}
+  return String(detail);
+}
+
+async function requestGemini(model, requestBody) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  let lastFailure = 'Gemini sementara tidak tersedia.';
+  for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody),
+      });
+      if (response.ok) return response;
+      const detail = parseGeminiError(await response.text());
+      if (!isRetryableGeminiFailure(response.status, detail) || attempt === GEMINI_MAX_RETRIES) {
+        return { response, detail, exhausted: attempt === GEMINI_MAX_RETRIES && isRetryableGeminiFailure(response.status, detail) };
+      }
+      lastFailure = detail;
+    } catch (error) {
+      lastFailure = error?.message || String(error);
+      if (attempt === GEMINI_MAX_RETRIES) throw Object.assign(new Error(lastFailure), { retryExhausted: true });
+    }
+    await wait(GEMINI_RETRY_BASE_MS * (2 ** attempt));
+  }
+  throw Object.assign(new Error(lastFailure), { retryExhausted: true });
+}
+
 app.post('/api/ai', async (req, res) => {
   if (!GEMINI_API_KEY) {
     return res.status(500).json({ error: 'GEMINI_API_KEY is not configured on the server (.env)' });
@@ -143,23 +188,14 @@ app.post('/api/ai', async (req, res) => {
     };
     if (json) requestBody.generationConfig.responseMimeType = 'application/json';
 
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-    });
-    if (!r.ok) {
-      const errText = await r.text();
-      let detail = errText;
-      try {
-        const providerError = JSON.parse(errText);
-        detail = providerError.error?.message || providerError.error?.status || providerError.error || errText;
-      } catch (e) {}
-      return res.status(502).json({ error: 'AI provider error', detail: String(detail) });
+    const result = await requestGemini(model, requestBody);
+    if (result.response && !result.response.ok) {
+      if (result.exhausted) {
+        return res.status(503).json({ error: 'AI temporarily unavailable', detail: 'Gemini sedang mengalami permintaan tinggi atau gangguan sementara. Silakan coba lagi beberapa saat lagi.' });
+      }
+      return res.status(502).json({ error: 'AI provider error', detail: result.detail });
     }
-    const data = await r.json();
+    const data = await result.json();
     const text = (data.candidates || [])
       .flatMap(candidate => candidate.content?.parts || [])
       .map(part => part.text || '')
@@ -175,6 +211,9 @@ app.post('/api/ai', async (req, res) => {
     }
     res.json({ text });
   } catch (e) {
+    if (e.retryExhausted) {
+      return res.status(503).json({ error: 'AI temporarily unavailable', detail: 'Gemini sedang mengalami gangguan sementara. Silakan coba lagi beberapa saat lagi.' });
+    }
     res.status(502).json({ error: 'AI request failed', detail: e?.message || String(e) });
   }
 });
