@@ -1,7 +1,7 @@
 // Screenly service worker — caches the app shell only.
 // It intentionally does NOT cache /api/* calls: recruitment data must
 // always come from the live server, never a stale cached copy.
-const CACHE_NAME = 'screenly-shell-v1';
+const CACHE_NAME = 'screenly-shell-v2';
 const SHELL_FILES = ['/', '/index.html', '/manifest.json'];
 
 self.addEventListener('install', (event) => {
@@ -24,6 +24,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.pathname.startsWith('/api/')) return; // never cache live data
   event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request).catch(() => cached))
+    fetch(event.request).then((response) => {
+      const copy = response.clone();
+      caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => {});
+      return response;
+    }).catch(() => caches.match(event.request))
   );
 });

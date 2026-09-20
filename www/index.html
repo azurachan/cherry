@@ -300,7 +300,7 @@ async function ensureNonDestructiveUpgrades(){
   } else {
     upgraded = !!MEM.__upgradeV1;
   }
-  if(upgraded) return;
+  if(upgraded){ await ensureNonDestructiveUpgradesV2(); return; }
 
   // 1) Backfill the qualification builder fields on existing jobs (additive only).
   for(const j of jobsArr()){
@@ -377,7 +377,7 @@ async function ensureNonDestructiveUpgradesV2(){
   let done = false;
   if(dbAvailable){ try{ const d = await dbApi.doc('meta/upgradeV2').get(); done = d.exists; }catch(e){} }
   else { done = !!MEM.__upgradeV2; }
-  if(done) return;
+  if(done){ await ensureNonDestructiveUpgradesV3(); return; }
 
   // 1) Give every existing job a recruitment mode + talent-brief fields (additive only, defaults to HR mode).
   for(const j of jobsArr()){
@@ -436,6 +436,29 @@ async function ensureNonDestructiveUpgradesV2(){
 
   if(dbAvailable){ try{ await dbApi.doc('meta/upgradeV2').set({done:true, at:Date.now()}); }catch(e){} }
   else { MEM.__upgradeV2 = true; }
+  await ensureNonDestructiveUpgradesV3();
+}
+
+async function ensureNonDestructiveUpgradesV3(){
+  let done = false;
+  if(dbAvailable){ try{ done = (await dbApi.doc('meta/upgradeV3').get()).exists; }catch(e){} }
+  else { done = !!MEM.__upgradeV3; }
+  if(done) return;
+  for(const c of candArr()){
+    const patched = {
+      ...c,
+      displayName: c.displayName || (isUsableCandidateName(c.name) ? c.name : ''),
+      nameSource: c.nameSource || (isUsableCandidateName(c.name) ? 'legacy' : 'missing'),
+      nameConfidence: c.nameConfidence ?? (isUsableCandidateName(c.name) ? 'legacy' : 'none'),
+      testCam: c.testCam || null,
+      background: c.background || '',
+      insight: c.insight || null,
+      lastActivityAt: c.lastActivityAt || (c.timeline||[]).reduce((max,e)=>Math.max(max,e.date||0), c.appliedAt||0)
+    };
+    await docSet('candidates', c.id, patched);
+  }
+  if(dbAvailable){ try{ await dbApi.doc('meta/upgradeV3').set({done:true, at:Date.now()}); }catch(e){} }
+  else { MEM.__upgradeV3 = true; }
 }
 
 
@@ -635,6 +658,45 @@ function guideArr(){ return Object.values(MEM.sourcingGuides||{}); }
 function dailyLogArr(){ return Object.values(MEM.dailyLogs||{}).sort((a,b)=>(b.date||'').localeCompare(a.date||'')); }
 function taskArr(){ return Object.values(MEM.tasks||{}).sort((a,b)=>a.createdAt-b.createdAt); }
 
+const CANDIDATE_NAME_PLACEHOLDERS = new Set(['kandidat','candidate','kandidat tanpa nama','unknown','nama kandidat']);
+function isUsableCandidateName(name){
+  const value = String(name||'').replace(/\s+/g,' ').trim();
+  return value.length >= 2 && value.length < 100 && !CANDIDATE_NAME_PLACEHOLDERS.has(value.toLowerCase()) && !/^candidate\s*\d+$/i.test(value);
+}
+function normaliseCandidateName(name){
+  const value = String(name||'').replace(/[|,;]+/g,' ').replace(/\s+/g,' ').trim();
+  return isUsableCandidateName(value) && /^[\p{L}][\p{L}'-]*(?:\s+[\p{L}][\p{L}'-]*){1,5}$/u.test(value) ? value : '';
+}
+function extractCandidateNameFromText(text){
+  const source = String(text||'').replace(/\r/g,'\n');
+  const labelled = source.match(/(?:nama\s*(?:lengkap|kandidat)?|full\s*name)\s*[:\-]\s*([\p{L}][\p{L}'-]*(?:\s+[\p{L}][\p{L}'-]*){1,5})/iu);
+  const labelledName = normaliseCandidateName(labelled?.[1]?.split(/\s+(?:email|e-mail|telepon|phone|alamat|address|tanggal|date)\b/i)[0]);
+  if(labelledName) return labelledName;
+  const lines = source.split('\n').map(line=>line.replace(/\s+/g,' ').trim()).filter(Boolean);
+  for(const line of lines.slice(0,12)){
+    const candidate = normaliseCandidateName(line.replace(/(?:email|e-mail|telepon|phone|alamat|address).*$/i,''));
+    if(candidate && !/resume|curriculum vitae|profile|profil|cv\b/i.test(candidate)) return candidate;
+  }
+  const compact = source.replace(/\s+/g,' ').trim();
+  const beforeContact = compact.split(/\s+(?:email|e-mail|telepon|phone|alamat|address)\s*[:\-]?/i)[0];
+  const tail = beforeContact.split(/[|,;•]/).pop()?.trim();
+  return normaliseCandidateName(tail);
+}
+function candidateDisplayName(c){
+  return isUsableCandidateName(c?.displayName) ? c.displayName : isUsableCandidateName(c?.name) ? c.name : 'Nama belum tersedia';
+}
+function candidateActivityAt(c){
+  return c?.lastActivityAt || (c?.timeline||[]).reduce((max,e)=>Math.max(max,e.date||0), c?.appliedAt||0);
+}
+function latestAssessmentStatus(c){
+  if(c?.insight) return 'Candidate Insight siap';
+  if(c?.interview?.analysis) return 'Interview dianalisis';
+  if(c?.testCam) return 'Test Cam dinilai';
+  if(c?.screening) return 'CV dianalisis';
+  return 'Assessment belum dimulai';
+}
+function evidenceOrMissing(value){ return value && String(value).trim() ? value : 'Insufficient evidence'; }
+
 function initials(name){ return (name||'?').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
 const AVATAR_COLORS = ['bg-coral-100 text-coral-700','bg-mint-100 text-mint-500','bg-lav-100 text-lav-500','bg-sky-100 text-sky-500','bg-sunny-100 text-[#a8790a]'];
 function avatarColor(name){ let h=0; for(const c of (name||'')) h+=c.charCodeAt(0); return AVATAR_COLORS[h%AVATAR_COLORS.length]; }
@@ -677,13 +739,13 @@ function circleScore(pct, size=96){
 function fallbackExtractCV(text){
   const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
   const phoneMatch = text.match(/(\+?\d[\d \-]{7,}\d)/);
-  const firstLine = text.split('\n').map(s=>s.trim()).filter(Boolean)[0] || 'Kandidat';
+  const extractedName = extractCandidateNameFromText(text);
   const skillsDict = ['sourcing','screening','rekrut','sales','negosiasi','komunikasi','excel','office','crm','sql','marketing','desain','customer service','leadership','javascript','python','accounting','admin','data entry','media sosial','konten','make up','styling','koreografi','tari','mc','obs','tiktok'];
   const lower = text.toLowerCase();
   const skills = skillsDict.filter(s=>lower.includes(s));
   const yearsMatch = text.match(/(\d{1,2})\s*\+?\s*tahun/i) || text.match(/(\d{1,2})\s*\+?\s*years?/i);
   return {
-    fullName: firstLine.length<60 ? firstLine : 'Kandidat',
+    fullName: extractedName || null,
     email: emailMatch ? emailMatch[0] : null, phone: phoneMatch ? phoneMatch[0] : null, location: null,
     education: [], experience: [], skills, certifications: [], languages: [],
     totalYearsExperience: yearsMatch ? parseInt(yearsMatch[1]) : null
@@ -704,9 +766,18 @@ function fallbackScore(cvData, job){
   const concerns = [];
   if(reqSkills.length && matched.length<reqSkills.length) concerns.push('Beberapa skill yang dibutuhkan tidak ditemukan secara jelas di teks CV.');
   if(mustHave.length && mustMatched.length<mustHave.length) concerns.push('Beberapa kriteria "must have" belum terlihat jelas di CV — perlu diverifikasi saat interview.');
+  const evidenceBlob = JSON.stringify(cvData).toLowerCase();
+  const professionalDance = /(dance|dancer|tari|penari|koreografi|choreograph|panggung|stage performance|kompetisi tari|dance competition)/i.test(evidenceBlob) && !/hobi|hobby|suka menari|likes dancing/i.test(evidenceBlob);
+  const evidence = [];
+  if(professionalDance) evidence.push('CV memuat bukti terkait tari/performance yang perlu ditinjau recruiter.');
+  if(/live|streaming|tiktok|host|audience|penonton/i.test(evidenceBlob)) evidence.push('CV memuat pengalaman yang berkaitan dengan live, streaming, host, atau audiens.');
+  const missingInfo = [];
+  if(!cvData.totalYearsExperience) missingInfo.push('Lama pengalaman kerja tidak bisa dipastikan dari CV.');
+  if(!professionalDance) missingInfo.push('Bukti pengalaman tari profesional belum ditemukan di CV.');
   return { overallScore: overall, breakdown:{ experience:expScore, skills:skillsScore, education:eduScore, relevantBackground:Math.round((skillsScore+expScore)/2), jobRequirements:skillsScore },
     whyMatches: `Berdasarkan pencocokan kata kunci, skill yang tercantum pada kandidat ini cocok dengan ${matched.length} dari ${reqSkills.length} skill yang dibutuhkan untuk posisi ini.`,
-    concerns, missingInfo: !cvData.totalYearsExperience ? ['Lama pengalaman kerja tidak bisa dipastikan dari CV.'] : [] };
+    cvEvidence:evidence, strengths:matched.length?['Skill yang relevan tercantum di CV.']:[], relevantExperience:cvData.experience||[], cvGaps:missingInfo,
+    recommendedInterviewQuestions:['Pengalaman mana yang paling relevan dengan posisi ini?','Bukti kerja atau performa apa yang dapat ditunjukkan?'], concerns, missingInfo };
 }
 
 async function aiCallJSON(prompt, tier='default'){
@@ -736,7 +807,7 @@ TEKS CV:
 Balas HANYA objek JSON-nya, tanpa markdown fence, tanpa komentar tambahan.`;
     const data = await aiCallJSON(prompt, 'default');
     if(!data || typeof data!=='object') throw new Error('bad shape');
-    return { fullName:data.fullName||null, email:data.email||null, phone:data.phone||null, location:data.location||null,
+    return { fullName:isUsableCandidateName(data.fullName)?data.fullName.trim():null, email:data.email||null, phone:data.phone||null, location:data.location||null,
       education:Array.isArray(data.education)?data.education:[], experience:Array.isArray(data.experience)?data.experience:[],
       skills:Array.isArray(data.skills)?data.skills:[], certifications:Array.isArray(data.certifications)?data.certifications:[],
       languages:Array.isArray(data.languages)?data.languages:[], totalYearsExperience: typeof data.totalYearsExperience==='number'?data.totalYearsExperience:null };
@@ -770,18 +841,25 @@ Red Flags (perlu diverifikasi jika muncul): ${(job.redFlags||[]).join(', ')||'Ti
 DATA CV KANDIDAT (JSON):
 ${JSON.stringify(cvData)}
 
+Untuk posisi Live Dancer/Live Talent, perlakukan dance performance, choreography, dance competition, stage performance, dance group, dan entertainment performance sebagai bukti relevan bila tertulis eksplisit. Jangan anggap hobi menari sebagai pengalaman profesional.
+
 Balas HANYA dengan objek JSON dengan key persis berikut:
 {"overallScore": number (0-100), "breakdown": {"experience": number, "skills": number, "education": number, "relevantBackground": number, "jobRequirements": number} (masing-masing 0-100),
  "whyMatches": string (2-4 kalimat berbasis data CV yang sebenarnya, menyebutkan skill/pengalaman spesifik yang cocok, termasuk kriteria must have/good to have/bonus yang terpenuhi),
  "concerns": string[] (catatan/kekhawatiran spesifik dan berbasis data, termasuk indikasi red flag yang perlu diverifikasi, array kosong jika tidak ada),
- "missingInfo": string[] (informasi spesifik terkait posisi ini yang tidak ada di CV, array kosong jika tidak ada)}
+ "missingInfo": string[] (informasi spesifik terkait posisi ini yang tidak ada di CV, array kosong jika tidak ada),
+ "cvEvidence": string[] (fakta atau bukti eksplisit dari CV), "strengths": string[], "relevantExperience": object[], "cvGaps": string[],
+ "recommendedInterviewQuestions": string[] (pertanyaan untuk memverifikasi hal yang belum jelas)}
 
 Balas HANYA objek JSON-nya.`;
     const data = await aiCallJSON(prompt, 'default');
     return { overallScore: clamp100(data.overallScore), breakdown:{
         experience:clamp100(data.breakdown?.experience), skills:clamp100(data.breakdown?.skills), education:clamp100(data.breakdown?.education),
         relevantBackground:clamp100(data.breakdown?.relevantBackground), jobRequirements:clamp100(data.breakdown?.jobRequirements) },
-      whyMatches: data.whyMatches||'', concerns: Array.isArray(data.concerns)?data.concerns:[], missingInfo: Array.isArray(data.missingInfo)?data.missingInfo:[] };
+      whyMatches: data.whyMatches||'', concerns: Array.isArray(data.concerns)?data.concerns:[], missingInfo: Array.isArray(data.missingInfo)?data.missingInfo:[],
+      cvEvidence:Array.isArray(data.cvEvidence)?data.cvEvidence:[], strengths:Array.isArray(data.strengths)?data.strengths:[],
+      relevantExperience:Array.isArray(data.relevantExperience)?data.relevantExperience:[], cvGaps:Array.isArray(data.cvGaps)?data.cvGaps:[],
+      recommendedInterviewQuestions:Array.isArray(data.recommendedInterviewQuestions)?data.recommendedInterviewQuestions:[] };
   }catch(e){ console.warn('Penilaian AI gagal, memakai fallback', e); return fallbackScore(cvData, job); }
 }
 function clamp100(n){ n = Number(n); if(isNaN(n)) return 50; return Math.max(0, Math.min(100, Math.round(n))); }
@@ -902,11 +980,8 @@ Balas HANYA array JSON berisi objek: [{"section": string, "text": string}, ...]`
 async function aiAnalyzeInterview(job, candidateName, qaPairs){
   const answered = qaPairs.filter(q=>q.answer && q.answer.trim());
   if(!aiAvailable){
-    const avgLen = answered.reduce((a,q)=>a+q.answer.length,0)/Math.max(1,answered.length);
-    const base = Math.min(90, Math.round(40 + avgLen/8));
-    return { overallScore: base, breakdown:{communication:base, relevantExperience:base-4, problemSolving:base-8, roleUnderstanding:base-2, motivation:base, availability:answered.some(q=>/tersedia|mulai|available|start/i.test(q.question))?85:60},
-      summary:`${candidateName} menjawab ${answered.length} dari ${qaPairs.length} pertanyaan. Analisis kualitatif yang lebih dalam membutuhkan akses AI.`,
-      strengths:[], concerns: answered.length<qaPairs.length ? ['Beberapa pertanyaan belum terjawab.'] : [], keyAnswers:[], followUpQuestions:[] };
+    return { overallScore: 0, breakdown:{communication:0, relevantExperience:0, problemSolving:0, roleUnderstanding:0, motivation:0, availability:0},
+      summary:'Insufficient evidence: analisis AI tidak tersedia untuk menilai jawaban interview secara evidence-based.', strengths:[], concerns:[], keyAnswers:[], followUpQuestions:[] };
   }
   try{
     const prompt = `Anda adalah asisten rekrutmen yang objektif, menganalisis transkrip interview untuk recruiter manusia yang membuat keputusan akhir — Anda tidak pernah memutuskan.
@@ -935,17 +1010,15 @@ Balas HANYA dengan objek JSON dengan key persis berikut:
       summary:data.summary||'', strengths:Array.isArray(data.strengths)?data.strengths:[], concerns:Array.isArray(data.concerns)?data.concerns:[],
       keyAnswers:Array.isArray(data.keyAnswers)?data.keyAnswers:[], followUpQuestions:Array.isArray(data.followUpQuestions)?data.followUpQuestions:[] };
   }catch(e){ console.warn('Analisis interview gagal', e); toast('Analisis AI sedang tidak tersedia — menampilkan ringkasan dasar.', 'error');
-    const avgLen = answered.reduce((a,q)=>a+q.answer.length,0)/Math.max(1,answered.length);
-    const base = Math.min(90, Math.round(40 + avgLen/8));
-    return { overallScore: base, breakdown:{communication:base, relevantExperience:base-4, problemSolving:base-8, roleUnderstanding:base-2, motivation:base, availability:60},
-      summary:`${candidateName} menjawab ${answered.length} dari ${qaPairs.length} pertanyaan.`, strengths:[], concerns:[], keyAnswers:[], followUpQuestions:[] };
+    return { overallScore: 0, breakdown:{communication:0, relevantExperience:0, problemSolving:0, roleUnderstanding:0, motivation:0, availability:0},
+      summary:'Insufficient evidence: analisis interview gagal tersedia dan perlu ditinjau recruiter secara manual.', strengths:[], concerns:[], keyAnswers:[], followUpQuestions:[] };
   }
 }
 async function aiDraftMessage(kind, job, candidate){
   if(!aiAvailable) return null;
   try{
     const prompt = `Tulis pesan rekrutmen singkat, hangat, dan profesional bertipe "${kind}" untuk kandidat ini, dalam Bahasa Indonesia. Gunakan placeholder {{date}}, {{time}}, {{location}} jika relevan, jangan mengarang detail spesifik. Jangan mengarang fakta tentang kandidat.
-Kandidat: ${candidate.name}
+Kandidat: ${candidateDisplayName(candidate)}
 Posisi: ${job?.name||''}
 Perusahaan: ${MEM.settings.companyName||'perusahaan kami'}
 Balas HANYA teks pesannya, tanpa subjek, tanpa komentar tambahan.`;
@@ -1211,9 +1284,10 @@ function viewDashboard(){
   <div class="grid md:grid-cols-3 gap-4">
     ${interviewsToday.length ? interviewsToday.map(c=>{
       const job=getJob(c.jobId);
+      const name=candidateDisplayName(c);
       return `<a href="#/candidate/${c.id}/interview" class="card rounded-3xl p-5 shadow-softer hover:shadow-lift transition group">
-        <div class="flex items-center gap-3 mb-3">${avatar(c.name,'w-10 h-10')}
-          <div class="min-w-0"><p class="font-bold text-sm truncate">${esc(c.name)}</p><p class="text-xs text-muted truncate">${esc(job?.name||'')}</p></div>
+        <div class="flex items-center gap-3 mb-3">${avatar(name,'w-10 h-10')}
+          <div class="min-w-0"><p class="font-bold text-sm truncate">${esc(name)}</p><p class="text-xs text-muted truncate">${esc(job?.name||'')}</p></div>
         </div>
         <div class="flex items-center gap-1.5 text-xs text-lav-500 font-semibold">${icon('clock','w-3.5 h-3.5')} ${esc(c.interview.scheduledTime||'Jam belum diisi')}</div>
       </a>`;
@@ -1257,11 +1331,11 @@ function weeklyChart(cands){
   </div>`;
 }
 function candidateReviewCard(c){
-  const job = getJob(c.jobId); const sc = scoreColor(c.screening.overallScore);
+  const job = getJob(c.jobId); const name = candidateDisplayName(c); const sc = scoreColor(c.screening.overallScore);
   return `<div class="card rounded-3xl p-5 shadow-softer flex items-center gap-4">
-    ${avatar(c.name,'w-12 h-12')}
+    ${avatar(name,'w-12 h-12')}
     <div class="min-w-0 flex-1">
-      <p class="font-bold text-sm truncate">${esc(c.name)}</p>
+      <p class="font-bold text-sm truncate">${esc(name)}</p>
       <p class="text-xs text-muted truncate">${esc(job?.name||'')} · ${c.cvData?.totalYearsExperience!=null?c.cvData.totalYearsExperience+' tahun pengalaman':'Pengalaman tidak diketahui'}</p>
       <div class="flex items-center gap-2 mt-1.5">
         <span class="text-xs font-extrabold px-2 py-0.5 rounded-full ${sc.chip} border">${c.screening.overallScore}% Cocok</span>
@@ -1424,7 +1498,7 @@ function viewCandidates(queryStr){
     const q = candFilters.q.toLowerCase();
     list = list.filter(c=>{
       const job = getJob(c.jobId);
-      return c.name.toLowerCase().includes(q) || (c.email||'').toLowerCase().includes(q) || (job?.name||'').toLowerCase().includes(q)
+      return candidateDisplayName(c).toLowerCase().includes(q) || (c.email||'').toLowerCase().includes(q) || (job?.name||'').toLowerCase().includes(q)
         || (c.cvData?.skills||[]).some(s=>s.toLowerCase().includes(q)) || c.stage.toLowerCase().includes(q);
     });
   }
@@ -1465,7 +1539,7 @@ function renderPartial(){
   if(!el) return;
   let list = candArr();
   if(candFilters.q){ const q=candFilters.q.toLowerCase(); list = list.filter(c=>{ const job=getJob(c.jobId);
-    return c.name.toLowerCase().includes(q) || (c.email||'').toLowerCase().includes(q) || (job?.name||'').toLowerCase().includes(q) || (c.cvData?.skills||[]).some(s=>s.toLowerCase().includes(q)) || c.stage.toLowerCase().includes(q); }); }
+    return candidateDisplayName(c).toLowerCase().includes(q) || (c.email||'').toLowerCase().includes(q) || (job?.name||'').toLowerCase().includes(q) || (c.cvData?.skills||[]).some(s=>s.toLowerCase().includes(q)) || c.stage.toLowerCase().includes(q); }); }
   if(candFilters.jobId) list = list.filter(c=>c.jobId===candFilters.jobId);
   if(candFilters.stage) list = list.filter(c=>c.stage===candFilters.stage);
   if(candFilters.minScore) list = list.filter(c=>(c.screening?.overallScore||0)>=candFilters.minScore);
@@ -1473,18 +1547,20 @@ function renderPartial(){
 }
 const CV_STATUS_LABELS = { Analyzed:'Dianalisis', Pending:'Menunggu', Failed:'Gagal' };
 function candidateRow(c){
-  const job = getJob(c.jobId); const sc = c.screening?scoreColor(c.screening.overallScore):null;
+  const job = getJob(c.jobId); const name = candidateDisplayName(c); const sc = c.screening?scoreColor(c.screening.overallScore):null;
   const interviewLabel = c.interview.status==='not_started'?'Interview Menunggu':c.interview.status==='analyzed'?'Interview Dianalisis':'Sedang Interview';
   return `<a href="#/candidate/${c.id}" class="card rounded-3xl p-4 md:p-5 shadow-softer flex flex-wrap md:flex-nowrap items-center gap-4 hover:shadow-lift transition">
-    ${avatar(c.name,'w-12 h-12')}
+    ${avatar(name,'w-12 h-12')}
     <div class="min-w-0 flex-1">
-      <div class="flex items-center gap-2 flex-wrap"><p class="font-bold text-sm">${esc(c.name)}</p>${stageBadge(c.stage)}</div>
+      <div class="flex items-center gap-2 flex-wrap"><p class="font-bold text-sm">${esc(name)}</p>${stageBadge(c.stage)}</div>
       <p class="text-xs text-muted mt-0.5">${esc(job?.name||'')} · Melamar ${fmtDate(c.appliedAt)}</p>
     </div>
     <div class="flex items-center gap-2 shrink-0">
       ${c.screening?`<span class="text-xs font-extrabold px-2.5 py-1 rounded-full border ${sc.chip}">${c.screening.overallScore}% Cocok</span>`:`<span class="text-xs text-muted">Belum discreening</span>`}
       <span class="hidden sm:inline text-xs text-muted px-2 py-1 rounded-full bg-sand-100">${CV_STATUS_LABELS[c.cvStatus]||c.cvStatus}</span>
       <span class="hidden sm:inline text-xs text-muted px-2 py-1 rounded-full bg-sand-100">${interviewLabel}</span>
+      <span class="hidden xl:inline text-xs text-muted px-2 py-1 rounded-full bg-sand-100">${latestAssessmentStatus(c)}</span>
+      <span class="hidden lg:inline text-xs text-muted">${timeAgo(candidateActivityAt(c))}</span>
     </div>
     <span class="ml-auto md:ml-0 text-xs font-bold px-3 py-2 rounded-xl bg-ink-900 text-white">Lihat Profil</span>
   </a>`;
@@ -1754,15 +1830,17 @@ async function startScreening(){
     }
 
     const candidate = {
-      id: uid('cand'), jobId, name: cvData.fullName || 'Kandidat Tanpa Nama', email: cvData.email, phone: cvData.phone,
+      id: uid('cand'), jobId, name: cvData.fullName || '', displayName: cvData.fullName || '',
+      nameSource: cvData.fullName ? 'cv' : 'missing', nameConfidence: cvData.fullName ? (aiAvailable?'ai':'fallback') : 'none',
+      email: cvData.email, phone: cvData.phone,
       location: cvData.location, cvText, cvData, cvStatus:'Analyzed',
       screening: { ...screening, alternativeSuggestions, recruiterNotes:'', status:'pending', source: aiAvailable?'ai':'fallback' },
       interview: { status:'not_started', questions:[], analysis:null, scheduledDate:null, scheduledTime:null, presenceRating:null },
-      stage: 'AI Screening', notes:[], appliedAt: Date.now(),
+      stage: 'AI Screening', notes:[], background:'', testCam:null, insight:null, appliedAt: Date.now(), lastActivityAt: Date.now(),
       timeline: [ {event:'CV Diunggah', date:Date.now()}, {event:'Screening AI Selesai', date:Date.now()} ]
     };
     await docSet('candidates', candidate.id, candidate);
-    await addNotification(`${candidate.name} telah discreening untuk posisi ${job.name} — ${screening.overallScore}% cocok.`, '#/candidate/'+candidate.id+'/screening');
+    await addNotification(`${candidateDisplayName(candidate)} telah discreening untuk posisi ${job.name} — ${screening.overallScore}% cocok.`, '#/candidate/'+candidate.id+'/screening');
     toast('CV berhasil dianalisis.', 'success');
     nav('#/candidate/'+candidate.id+'/screening');
   }catch(e){
@@ -1776,24 +1854,41 @@ async function addNotification(text, link){
   const n = { id: uid('notif'), text, createdAt: Date.now(), read:false, link };
   await docSet('notifications', n.id, n);
 }
+async function saveCandidateIdentity(id){
+  const c = getCand(id); if(!c) return;
+  const name = (document.getElementById('candidateName_'+id)?.value||'').replace(/\s+/g,' ').trim();
+  if(name && !isUsableCandidateName(name)){ toast('Masukkan nama kandidat yang valid.','error'); return; }
+  c.displayName = name; c.name = name; c.nameSource = name ? 'manual' : 'missing'; c.nameConfidence = name ? 'manual' : 'none';
+  c.lastActivityAt = Date.now(); c.timeline = c.timeline||[];
+  c.timeline.push({event:name?'Nama kandidat diperbarui recruiter':'Nama kandidat dikosongkan', date:Date.now()});
+  await docSet('candidates', id, c);
+  toast(name?'Nama kandidat disimpan.':'Nama kandidat dihapus.','success'); render();
+}
+async function saveCandidateBackground(id){
+  const c = getCand(id); if(!c) return;
+  c.background = document.getElementById('candidateBackground_'+id)?.value.trim() || '';
+  c.lastActivityAt = Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Background kandidat diperbarui recruiter',date:Date.now()});
+  await docSet('candidates', id, c); toast('Background disimpan.','success');
+}
 
 /* ============================== CANDIDATE PROFILE =============================== */
-const TAB_LABELS = { overview:'Ringkasan', screening:'Screening', interview:'Interview', livetalent:'Live Talent', notes:'Catatan', timeline:'Linimasa' };
+const TAB_LABELS = { overview:'Ringkasan', screening:'Screening', interview:'Interview', livetalent:'Live Talent', insight:'Candidate Insight', notes:'Catatan', timeline:'Linimasa' };
 function viewCandidate(id, tab){
   const c = getCand(id); if(!c) return notFound('Kandidat tidak ditemukan');
   const job = getJob(c.jobId);
+  const name = candidateDisplayName(c);
   tab = tab || 'overview';
   const isTalent = job?.recruitmentType==='talent';
-  const tabs = isTalent ? ['overview','screening','interview','livetalent','notes','timeline'] : ['overview','screening','interview','notes','timeline'];
+  const tabs = isTalent ? ['overview','screening','interview','livetalent','insight','notes','timeline'] : ['overview','screening','interview','insight','notes','timeline'];
   const sc = c.screening ? scoreColor(c.screening.overallScore) : null;
   return `
   <button onclick="history.back()" class="text-sm text-muted hover:text-main mb-4 inline-flex items-center gap-1">${icon('chevLeft','w-4 h-4')} Kembali</button>
   <div class="card rounded-3xl p-6 shadow-softer mb-6">
     <div class="flex flex-wrap items-center gap-4 justify-between">
       <div class="flex items-center gap-4">
-        ${avatar(c.name,'w-16 h-16 text-lg')}
+        ${avatar(name,'w-16 h-16 text-lg')}
         <div>
-          <h1 class="font-display text-xl md:text-2xl font-extrabold">${esc(c.name)}</h1>
+          <h1 class="font-display text-xl md:text-2xl font-extrabold">${esc(name)}</h1>
           <p class="text-sm text-muted">Kandidat ${esc(job?.name||'')} ${isTalent?'<span class=\"ml-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-lav-50 text-lav-500 border border-lav-200\">Live Talent</span>':''}</p>
           <div class="flex items-center gap-2 mt-1.5 flex-wrap">${stageBadge(c.stage)} ${c.screening?`<span class="text-xs font-extrabold px-2.5 py-1 rounded-full border ${sc.chip}">${c.screening.overallScore}% Cocok AI</span>`:''} ${c.talent?.finalScore!=null?`<span class="text-xs font-extrabold px-2.5 py-1 rounded-full border bg-lav-50 text-lav-500 border-lav-200">Talent Score ${c.talent.finalScore}/100</span>`:''}</div>
         </div>
@@ -1814,9 +1909,52 @@ function viewCandidate(id, tab){
     ${tab==='screening'?tabScreening(c,job):''}
     ${tab==='interview'?tabInterview(c,job):''}
     ${tab==='livetalent'?tabLiveTalent(c,job):''}
+    ${tab==='insight'?tabCandidateInsight(c,job):''}
     ${tab==='notes'?tabNotes(c):''}
     ${tab==='timeline'?tabTimeline(c):''}
   </div>`;
+}
+function buildCandidateInsight(c){
+  const scores = [];
+  if(c.screening) scores.push({label:'CV Assessment', score:c.screening.overallScore});
+  if(c.testCam?.score!=null) scores.push({label:'Test Cam Assessment', score:c.testCam.score});
+  if(c.interview?.analysis) scores.push({label:'Interview Assessment', score:c.interview.analysis.overallScore});
+  const overallFit = scores.length ? Math.round(scores.reduce((sum,item)=>sum+item.score,0)/scores.length) : null;
+  const missing = [];
+  if(!c.screening) missing.push('CV screening belum selesai.');
+  if(!c.testCam) missing.push('Test Cam belum selesai.');
+  if(!c.interview?.analysis) missing.push('Interview belum selesai.');
+  const strengths = [...(c.screening?.strengths||[]), ...(c.interview?.analysis?.strengths||[]), ...(c.testCam?.observedStrengths||[])];
+  const concerns = [...(c.screening?.concerns||[]), ...(c.interview?.analysis?.concerns||[]), ...(c.testCam?.observedWeaknesses||[])];
+  const followUp = [...(c.screening?.recommendedInterviewQuestions||[]), ...(c.interview?.analysis?.followUpQuestions||[]), ...(c.testCam?.recruiterFollowUp||[])];
+  return { overallFit, scores, strengths:[...new Set(strengths)].slice(0,8), areasToVerify:[...new Set(missing.concat(c.screening?.missingInfo||[]))].slice(0,8), missingEvidence:missing, potentialConcerns:[...new Set(concerns)].slice(0,8), recruiterFollowUp:[...new Set(followUp)].slice(0,8), finalSummary:overallFit==null?'Insufficient evidence':'Ringkasan ini hanya menggunakan bukti CV, Test Cam, dan Interview yang tersedia.' };
+}
+function tabCandidateInsight(c, job){
+  const i = c.insight || buildCandidateInsight(c);
+  return `<div class="space-y-5">
+    <div class="card rounded-3xl p-6 shadow-softer flex flex-wrap items-center justify-between gap-4">
+      <div><h2 class="font-display font-bold text-lg">CANDIDATE INSIGHT</h2><p class="text-sm text-muted">Asisten recruiter berbasis evidence, bukan keputusan otomatis.</p></div>
+      <div class="text-center"><p class="text-xs text-muted font-bold">Overall Fit</p><p class="font-display text-3xl font-extrabold">${i.overallFit==null?'Insufficient evidence':i.overallFit+'%'}</p></div>
+      <button onclick="generateCandidateInsight('${c.id}')" class="px-4 py-2.5 rounded-xl bg-ink-900 text-white text-sm font-bold">${c.insight?'Perbarui Insight':'Buat Insight'}</button>
+    </div>
+    <div class="grid md:grid-cols-3 gap-5">${i.scores.map(s=>`<div class="card rounded-3xl p-5 shadow-softer"><p class="text-xs text-muted font-bold">${esc(s.label)}</p><p class="font-display text-2xl font-extrabold mt-1">${s.score}%</p></div>`).join('') || `<div class="card rounded-3xl p-5 shadow-softer text-sm text-muted md:col-span-3">Insufficient evidence</div>`}</div>
+    <div class="grid md:grid-cols-2 gap-5">
+      ${insightListCard('Strengths',i.strengths,'text-mint-500')}
+      ${insightListCard('Areas to Verify',i.areasToVerify,'text-sunny-600')}
+      ${insightListCard('Missing Evidence',i.missingEvidence,'text-sky-500')}
+      ${insightListCard('Potential Concerns',i.potentialConcerns,'text-coral-600')}
+    </div>
+    ${insightListCard('Recruiter Follow-up',i.recruiterFollowUp,'text-lav-500')}
+    <div class="card rounded-3xl p-6 shadow-softer"><h3 class="font-bold text-sm mb-2">Final Summary</h3><p class="text-sm text-ink-700">${esc(i.finalSummary||'Insufficient evidence')}</p></div>
+  </div>`;
+}
+function insightListCard(title, items, color){
+  return `<div class="card rounded-3xl p-6 shadow-softer"><h3 class="font-bold text-sm mb-2 ${color}">${title}</h3>${items?.length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${items.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}</div>`;
+}
+async function generateCandidateInsight(id){
+  const c = getCand(id); if(!c) return;
+  c.insight = buildCandidateInsight(c); c.lastActivityAt = Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Candidate Insight diperbarui',date:Date.now()});
+  await docSet('candidates', id, c); toast('Candidate Insight diperbarui.','success'); render();
 }
 async function moveStage(id, stage){
   const c = getCand(id); c.stage = stage; c.timeline = c.timeline||[]; c.timeline.push({event:'Dipindahkan ke '+stageLabel(stage), date:Date.now()});
@@ -1827,12 +1965,23 @@ function tabOverview(c){
   return `<div class="grid lg:grid-cols-3 gap-5">
     <div class="lg:col-span-2 space-y-5">
       <div class="card rounded-3xl p-6 shadow-softer">
+        <h3 class="font-display font-bold mb-3">Identitas Kandidat</h3>
+        <p class="text-xs text-muted mb-2">Nama hasil CV dapat dikoreksi recruiter dan dipakai di seluruh Screenly.</p>
+        <div class="flex gap-2"><input id="candidateName_${c.id}" value="${esc(c.displayName||c.name||'')}" placeholder="Nama kandidat" class="flex-1 rounded-xl border border-app px-3.5 py-2.5 text-sm"/><button onclick="saveCandidateIdentity('${c.id}')" class="px-4 py-2.5 rounded-xl bg-ink-900 text-white text-sm font-bold">Simpan</button></div>
+      </div>
+      <div class="card rounded-3xl p-6 shadow-softer">
         <h3 class="font-display font-bold mb-3">Informasi Kontak</h3>
         <div class="grid sm:grid-cols-2 gap-3 text-sm">
           <div class="flex items-center gap-2 text-ink-700">${icon('mail','w-4 h-4 text-muted')} ${esc(c.email||'—')}</div>
           <div class="flex items-center gap-2 text-ink-700">${icon('phone','w-4 h-4 text-muted')} ${esc(c.phone||'—')}</div>
           <div class="flex items-center gap-2 text-ink-700">${icon('pin','w-4 h-4 text-muted')} ${esc(c.location||'—')}</div>
         </div>
+      </div>
+      <div class="card rounded-3xl p-6 shadow-softer">
+        <h3 class="font-display font-bold mb-3">Background Recruiter</h3>
+        <p class="text-xs text-muted mb-2">Catat fakta yang relevan. AI tidak akan menyimpulkan kepribadian dari background ini.</p>
+        <textarea id="candidateBackground_${c.id}" rows="3" class="w-full rounded-xl border border-app px-3.5 py-2.5 text-sm" placeholder="Contoh: Kandidat saat ini tinggal mandiri.">${esc(c.background||'')}</textarea>
+        <button onclick="saveCandidateBackground('${c.id}')" class="mt-3 px-4 py-2.5 rounded-xl border border-app text-sm font-bold">Simpan Background</button>
       </div>
       <div class="card rounded-3xl p-6 shadow-softer">
         <h3 class="font-display font-bold mb-3 flex items-center gap-2">${icon('briefcase','w-4 h-4 text-muted')} Pengalaman</h3>
@@ -1924,6 +2073,29 @@ function tabScreening(c, job){
     </div>
   </div>
 
+  <div class="grid md:grid-cols-2 gap-5 mt-5">
+    <div class="card rounded-3xl p-6 shadow-softer">
+      <h3 class="font-bold text-sm mb-2">CV Evidence</h3>
+      ${(s.cvEvidence||[]).length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${s.cvEvidence.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}
+    </div>
+    <div class="card rounded-3xl p-6 shadow-softer">
+      <h3 class="font-bold text-sm mb-2">Strengths</h3>
+      ${(s.strengths||[]).length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${s.strengths.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}
+    </div>
+    <div class="card rounded-3xl p-6 shadow-softer">
+      <h3 class="font-bold text-sm mb-2">Relevant Experience</h3>
+      ${(s.relevantExperience||[]).length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${s.relevantExperience.map(x=>`<li>${esc(typeof x==='string'?x:[x.title,x.company,x.description].filter(Boolean).join(' - '))}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}
+    </div>
+    <div class="card rounded-3xl p-6 shadow-softer">
+      <h3 class="font-bold text-sm mb-2">CV Gaps</h3>
+      ${(s.cvGaps||s.missingInfo||[]).length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${(s.cvGaps||s.missingInfo||[]).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}
+    </div>
+  </div>
+  <div class="card rounded-3xl p-6 shadow-softer mt-5">
+    <h3 class="font-bold text-sm mb-2">Recommended Interview Questions</h3>
+    ${(s.recommendedInterviewQuestions||[]).length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${s.recommendedInterviewQuestions.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}
+  </div>
+
   <div class="card rounded-3xl p-6 shadow-softer mt-5">
     <h3 class="font-bold text-sm mb-2">Catatan Recruiter</h3>
     <textarea id="screeningNotes" rows="3" class="w-full rounded-xl border border-app px-3.5 py-2.5 text-sm" placeholder="Tambahkan catatan penilaian Anda...">${esc(s.recruiterNotes||'')}</textarea>
@@ -2001,11 +2173,12 @@ async function saveInterviewSchedule(cid){
 function viewInterviewSetup(id){
   const c = getCand(id); if(!c) return notFound('Kandidat tidak ditemukan');
   const job = getJob(c.jobId);
+  const name = candidateDisplayName(c);
   const tpls = interviewTplArr();
   return `
   <button onclick="history.back()" class="text-sm text-muted hover:text-main mb-4 inline-flex items-center gap-1">${icon('chevLeft','w-4 h-4')} Kembali</button>
   <div class="max-w-2xl mx-auto text-center mb-6">
-    <h1 class="font-display text-2xl font-extrabold">Mulai Interview — ${esc(c.name)}</h1>
+    <h1 class="font-display text-2xl font-extrabold">Mulai Interview — ${esc(name)}</h1>
     <p class="text-muted text-sm mt-1">Tentukan jadwal, lalu pilih cara menyusun pertanyaan untuk screening ${esc(job?.name||'')} ini.</p>
   </div>
   <div class="card rounded-3xl p-6 shadow-softer max-w-3xl mx-auto mb-5">
@@ -2040,6 +2213,7 @@ async function beginInterview(id, mode){
   nav('#/candidate/'+id+'/interview');
 }
 function renderInterviewWorkspace(c, job){
+  const name = candidateDisplayName(c);
   const sections = {};
   c.interview.questions.forEach(q=>{ sections[q.section]=sections[q.section]||[]; sections[q.section].push(q); });
   const analyzed = c.interview.status==='analyzed';
@@ -2110,7 +2284,7 @@ async function runInterviewAnalysis(cid){
   const c = getCand(cid); const job = getJob(c.jobId);
   const btn = document.getElementById('analyzeBtn'); if(btn){ btn.disabled=true; btn.innerHTML = statusLine('Menganalisis interview...', true); }
   const qaPairs = c.interview.questions.map(q=>({ question:q.text, section:q.section, answer:q.answer||'' }));
-  const analysis = await aiAnalyzeInterview(job, c.name, qaPairs);
+  const analysis = await aiAnalyzeInterview(job, candidateDisplayName(c), qaPairs);
   c.interview.status = 'analyzed'; c.interview.analysis = analysis;
   c.timeline = c.timeline||[]; c.timeline.push({event:'Interview Selesai', date:Date.now()});
   await docSet('candidates', cid, c);
@@ -2221,6 +2395,7 @@ function tabLiveTalent(c, job){
   const t = c.talent;
   const score = computeTalentScore(t, job);
   const w = job.scorecardWeights || DEFAULT_TALENT_WEIGHTS;
+  const testCam = c.testCam;
   return `
   <div class="grid lg:grid-cols-3 gap-5">
     <div class="lg:col-span-1 space-y-5">
@@ -2254,6 +2429,12 @@ function tabLiveTalent(c, job){
       </div>
     </div>
     <div class="lg:col-span-2 space-y-5">
+      ${testCam?`<div class="card rounded-3xl p-6 shadow-softer border-2 border-sky-200 bg-sky-50/30">
+        <div class="flex items-center justify-between gap-3 mb-3"><h3 class="font-bold text-sm">Test Cam Assessment</h3><span class="font-display text-2xl font-extrabold text-sky-500">${testCam.score}%</span></div>
+        <div class="grid md:grid-cols-2 gap-4 text-sm"><div><p class="text-xs font-bold text-mint-500 mb-1">Observed Strengths</p>${testCam.observedStrengths?.length?`<ul class="list-disc ml-4 space-y-1">${testCam.observedStrengths.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="text-muted">Insufficient evidence</p>'}</div><div><p class="text-xs font-bold text-coral-600 mb-1">Observed Weaknesses</p>${testCam.observedWeaknesses?.length?`<ul class="list-disc ml-4 space-y-1">${testCam.observedWeaknesses.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="text-muted">Insufficient evidence</p>'}</div></div>
+        <p class="text-xs font-bold text-sky-500 mt-3 mb-1">Specific Evidence</p>${testCam.specificEvidence?.length?`<ul class="text-sm list-disc ml-4 space-y-1">${testCam.specificEvidence.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:'<p class="text-sm text-muted">Insufficient evidence</p>'}
+        <p class="text-xs font-bold text-lav-500 mt-3 mb-1">Recruiter Follow-up Points</p><ul class="text-sm list-disc ml-4"><li>${esc(testCam.recruiterFollowUp?.[0]||'Insufficient evidence')}</li></ul>
+      </div>`:''}
       <div class="card rounded-3xl p-6 shadow-softer border-2 border-coral-200 bg-coral-50/30">
         <label class="flex items-start gap-2.5 text-sm cursor-pointer">
           <input type="checkbox" id="workBoundariesAck" ${t.workBoundariesAck?'checked':''} class="w-4 h-4 mt-0.5 accent-coral-500"/>
@@ -2263,7 +2444,7 @@ function tabLiveTalent(c, job){
       <div class="card rounded-3xl p-6 shadow-softer">
         <div class="flex items-center justify-between mb-1"><h3 class="font-bold text-sm">Presentation Assessment</h3>
           <button onclick="aiPresentationNote('${c.id}')" class="text-xs font-bold text-lav-500 flex items-center gap-1">${icon('sparkle','w-3.5 h-3.5')} Minta kesan awal AI</button></div>
-        <p class="text-[11px] text-muted mb-3">Menilai kesiapan tampil, grooming, styling, kepercayaan diri di depan kamera — <b>bukan skor kecantikan</b>. Penilaian akhir tetap milik Anda.</p>
+        <p class="text-[11px] text-muted mb-3">Catat faktor presentasi yang relevan dengan pekerjaan dan dapat diamati, seperti kejelasan komunikasi, respons terhadap arahan, dan kesiapan teknis. Jangan menilai daya tarik, bentuk tubuh, ras, usia, atau karakteristik pribadi lainnya.</p>
         ${t.presentation.aiNotes?`<div class="bg-lav-50 border border-lav-200 rounded-xl p-3 mb-3 text-xs"><b class="text-lav-500">Kesan awal AI (berdasarkan catatan yang ada):</b> ${esc(t.presentation.aiNotes)}</div>`:''}
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
           ${scoreSelect('p_recruiterScore','Presentasi Umum', t.presentation.recruiterScore)}
@@ -2335,6 +2516,19 @@ function tabLiveTalent(c, job){
     </div>
   </div>`;
 }
+function buildTestCamAssessment(t){
+  const camera = avgScores(t.cameraTest?.scores)/5*100;
+  const dance = avgScores(t.danceTest1?.scores)/5*100;
+  const consistency = avgScores(t.danceTest2?.scores)/5*100;
+  const score = Math.round((camera+dance+consistency)/3);
+  const observedStrengths = [];
+  const observedWeaknesses = [];
+  if(camera >= 60) observedStrengths.push('Camera presence dan respons observasi berada pada level yang tercatat recruiter.');
+  else observedWeaknesses.push('Camera presence belum menunjukkan bukti yang cukup dari skor observasi.');
+  if(dance >= 60) observedStrengths.push('Eksekusi dance/rhythm memiliki skor observasi yang mendukung.');
+  else observedWeaknesses.push('Eksekusi dance/rhythm perlu diverifikasi lebih lanjut.');
+  return { score, observedStrengths, observedWeaknesses, specificEvidence:[t.cameraTest?.notes,t.danceTest1?.notes,t.danceTest2?.notes,t.danceTest3?.notes].filter(Boolean), recruiterFollowUp:['Verifikasi ulang faktor dengan skor rendah menggunakan rekaman atau observasi tambahan.'] };
+}
 async function aiPresentationNote(cid){
   const c = getCand(cid); const job = getJob(c.jobId);
   toast('Meminta kesan awal AI...');
@@ -2365,6 +2559,8 @@ async function saveTalentAssessment(cid){
   t.recruiterDecision = val('talentDecision') || null;
   t.finalScore = computeTalentScore(t, job).total;
   c.talent = t;
+  c.testCam = buildTestCamAssessment(t);
+  c.lastActivityAt = Date.now();
   c.timeline = c.timeline||[]; c.timeline.push({event:'Penilaian Live Talent diperbarui (skor: '+t.finalScore+')', date:Date.now()});
   await docSet('candidates', cid, c);
   toast('Penilaian talent disimpan.','success');
@@ -2393,9 +2589,10 @@ function viewPipeline(){
 }
 function pipelineCard(c){
   const job = getJob(c.jobId);
+  const name = candidateDisplayName(c);
   return `<div draggable="true" ondragstart="event.dataTransfer.setData('text/plain','${c.id}'); this.classList.add('drag-ghost')" ondragend="this.classList.remove('drag-ghost')"
     class="card rounded-2xl p-4 shadow-softer cursor-grab">
-    <div class="flex items-center gap-2 mb-2">${avatar(c.name,'w-8 h-8 text-xs')}<div class="min-w-0"><p class="text-sm font-bold truncate">${esc(c.name)}</p><p class="text-[11px] text-muted truncate">${esc(job?.name||'')}</p></div></div>
+    <div class="flex items-center gap-2 mb-2">${avatar(name,'w-8 h-8 text-xs')}<div class="min-w-0"><p class="text-sm font-bold truncate">${esc(name)}</p><p class="text-[11px] text-muted truncate">${esc(job?.name||'')}</p></div></div>
     <div class="flex items-center gap-1.5 flex-wrap">
       ${c.screening?`<span class="text-[10px] font-bold px-2 py-0.5 rounded-full border ${scoreColor(c.screening.overallScore).chip}">${c.screening.overallScore}% CV</span>`:''}
       ${c.interview.analysis?`<span class="text-[10px] font-bold px-2 py-0.5 rounded-full border bg-lav-50 text-lav-500 border-lav-200">${c.interview.analysis.overallScore}% Interview</span>`:''}
@@ -2421,7 +2618,7 @@ function viewCompare(){
   ${pageHeader('Bandingkan Kandidat', 'Pilih hingga 4 kandidat untuk ditinjau berdampingan. Alat ini tidak memberi peringkat kandidat secara otomatis.')}
   <div class="card rounded-3xl p-4 shadow-softer mb-5">
     <div class="flex flex-wrap gap-2">
-      ${cands.map(c=>chip(c.name, compareSelected.has(c.id), `toggleCompare('${c.id}')`)).join('')}
+      ${cands.map(c=>chip(candidateDisplayName(c), compareSelected.has(c.id), `toggleCompare('${c.id}')`)).join('')}
     </div>
   </div>
   <div id="compareTable">${compareTableHtml()}</div>`;
@@ -2448,7 +2645,7 @@ function compareTableHtml(){
     <table class="w-full text-sm">
       <thead><tr class="border-b border-app">
         <th class="text-left p-4 font-bold text-xs text-muted uppercase">Kandidat</th>
-        ${list.map(c=>`<th class="text-left p-4 min-w-[180px]"><div class="flex items-center gap-2">${avatar(c.name,'w-8 h-8 text-xs')}<span class="font-bold">${esc(c.name)}</span></div></th>`).join('')}
+        ${list.map(c=>`<th class="text-left p-4 min-w-[180px]"><div class="flex items-center gap-2">${avatar(candidateDisplayName(c),'w-8 h-8 text-xs')}<span class="font-bold">${esc(candidateDisplayName(c))}</span></div></th>`).join('')}
       </tr></thead>
       <tbody>
         ${rows.map(r=>`<tr class="border-b border-app last:border-0">
@@ -2546,7 +2743,7 @@ function openFillTemplate(id){
   document.getElementById('templateModalWrap').innerHTML = modalWrap(`
     <h3 class="font-display font-bold text-lg mb-4">Gunakan Template — ${esc(t.name)}</h3>
     <label class="block mb-3"><span class="text-xs font-bold">Kandidat</span>
-      <select id="fill_cand" onchange="renderFillPreview('${id}')" class="mt-1 w-full rounded-xl border border-app px-3 py-2 text-sm">${cands.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></label>
+      <select id="fill_cand" onchange="renderFillPreview('${id}')" class="mt-1 w-full rounded-xl border border-app px-3 py-2 text-sm">${cands.map(c=>`<option value="${c.id}">${esc(candidateDisplayName(c))}</option>`).join('')}</select></label>
     <div class="grid grid-cols-3 gap-2 mb-3">
       <input id="fill_date" onkeyup="renderFillPreview('${id}')" placeholder="Tanggal" class="rounded-xl border border-app px-2.5 py-2 text-xs"/>
       <input id="fill_time" onkeyup="renderFillPreview('${id}')" placeholder="Jam" class="rounded-xl border border-app px-2.5 py-2 text-xs"/>
@@ -2560,7 +2757,7 @@ function openFillTemplate(id){
 function renderFillPreview(id){
   const t = MEM.chatTemplates[id]; const c = getCand(val('fill_cand')); const job = c?getJob(c.jobId):null;
   let body = t.body
-    .replaceAll('{{candidate_name}}', c?c.name:'')
+    .replaceAll('{{candidate_name}}', c?candidateDisplayName(c):'')
     .replaceAll('{{position}}', job?job.name:'')
     .replaceAll('{{date}}', val('fill_date')||'[TANGGAL]')
     .replaceAll('{{time}}', val('fill_time')||'[JAM]')
@@ -2574,10 +2771,11 @@ function copyFillPreview(){
 }
 function openMessageModal(cid){
   const c = getCand(cid); const job = getJob(c.jobId);
+  const name = candidateDisplayName(c);
   const relevant = chatTplArr();
   document.getElementById('templateModalWrap') || (document.body.insertAdjacentHTML('beforeend', '<div id="templateModalWrap"></div>'));
   document.getElementById('templateModalWrap').innerHTML = modalWrap(`
-    <h3 class="font-display font-bold text-lg mb-4">Pesan untuk ${esc(c.name)}</h3>
+    <h3 class="font-display font-bold text-lg mb-4">Pesan untuk ${esc(name)}</h3>
     <select id="msg_tpl" class="w-full rounded-xl border border-app px-3 py-2 text-sm mb-3">${relevant.map(t=>`<option value="${t.id}">${esc(t.category)} — ${esc(t.name)}</option>`).join('')}</select>
     <button onclick="fillMsgPreview('${cid}')" class="text-xs font-bold text-coral-600 mb-3">Muat ke pratinjau</button>
     <textarea id="msgPreview" rows="9" class="w-full rounded-xl border border-app px-3 py-2 text-sm bg-sand-100"></textarea>
@@ -2588,7 +2786,7 @@ function openMessageModal(cid){
 function fillMsgPreview(cid){
   const t = MEM.chatTemplates[val('msg_tpl')]; if(!t) return;
   const c = getCand(cid); const job = getJob(c.jobId);
-  const body = t.body.replaceAll('{{candidate_name}}', c.name).replaceAll('{{position}}', job?.name||'').replaceAll('{{date}}','[TANGGAL]').replaceAll('{{time}}','[JAM]').replaceAll('{{location}}','[LOKASI]').replaceAll('{{company_name}}', MEM.settings.companyName||'perusahaan kami');
+  const body = t.body.replaceAll('{{candidate_name}}', candidateDisplayName(c)).replaceAll('{{position}}', job?.name||'').replaceAll('{{date}}','[TANGGAL]').replaceAll('{{time}}','[JAM]').replaceAll('{{location}}','[LOKASI]').replaceAll('{{company_name}}', MEM.settings.companyName||'perusahaan kami');
   document.getElementById('msgPreview').value = body;
 }
 function copyMsgPreview(){
@@ -2896,12 +3094,13 @@ function viewFollowUp(){
   <div class="space-y-3">
     ${needsFollowUp.length ? needsFollowUp.map(c=>{
       const job = getJob(c.jobId);
+      const name = candidateDisplayName(c);
       const lastEvent = (c.timeline||[]).reduce((max,e)=>Math.max(max,e.date||0), c.appliedAt);
       const days = Math.floor((now-lastEvent)/86400000);
       return `<div class="card rounded-3xl p-5 shadow-softer flex flex-wrap items-center gap-4">
-        ${avatar(c.name,'w-11 h-11')}
+        ${avatar(name,'w-11 h-11')}
         <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2 flex-wrap"><p class="font-bold text-sm">${esc(c.name)}</p>${stageBadge(c.stage)}</div>
+          <div class="flex items-center gap-2 flex-wrap"><p class="font-bold text-sm">${esc(name)}</p>${stageBadge(c.stage)}</div>
           <p class="text-xs text-muted mt-0.5">${esc(job?.name||'')} · Tidak ada aktivitas selama ${days} hari</p>
         </div>
         <div class="flex flex-wrap gap-2 shrink-0">
