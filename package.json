@@ -1,0 +1,22 @@
+{
+  "name": "screenly",
+  "version": "1.0.0",
+  "description": "Screenly — AI Recruitment & Talent Sourcing Assistant for HR Zhura / PT Inflow Park International",
+  "scripts": {
+    "server": "node server/server.js",
+    "cap:add:android": "npx cap add android",
+    "cap:add:ios": "npx cap add ios",
+    "cap:sync": "npx cap sync",
+    "cap:open:android": "npx cap open android",
+    "cap:open:ios": "npx cap open ios",
+    "android:build:debug": "cd android && ./gradlew assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2",
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/ios": "^6.1.2"
+  }
+}

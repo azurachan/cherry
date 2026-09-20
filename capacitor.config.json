@@ -1,0 +1,12 @@
+{
+  "appId": "com.screenly.hr",
+  "appName": "Screenly",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "server": {
+    "//": "OPTION A (recommended): point the native app at your live HTTPS deployment so every platform (web, Android, iOS) always talks to the same backend/database. Uncomment and set this once Screenly is deployed:",
+    "//url": "https://screenly.yourdomain.com",
+    "//cleartext": false,
+    "androidScheme": "https"
+  }
+}
