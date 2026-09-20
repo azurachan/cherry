@@ -194,16 +194,22 @@ function makeRestDb(){
   };
 }
 function makeRestAi(){
+  const apiBase = ['localhost','127.0.0.1'].includes(location.hostname) ? '' : 'https://screenly-rkj3.onrender.com';
+  async function request(body){
+    const r = await fetch(apiBase+'/api/ai', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await r.json().catch(()=>({}));
+    if(!r.ok){
+      const detail = data.detail ? `: ${data.detail}` : '';
+      throw new Error((data.error||`AI request failed (${r.status})`)+detail);
+    }
+    return data;
+  }
   async function call(prompt, opts){
-    const r = await fetch('/api/ai', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ prompt, modelTier: opts?.modelTier }) });
-    if(!r.ok) throw new Error('AI request failed');
-    const data = await r.json();
+    const data = await request({ prompt, modelTier: opts?.modelTier });
     return { text: data.text };
   }
   call.json = async function(prompt, opts){
-    const r = await fetch('/api/ai', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ prompt, modelTier: opts?.modelTier, json:true }) });
-    if(!r.ok) throw new Error('AI request failed');
-    const data = await r.json();
+    const data = await request({ prompt, modelTier: opts?.modelTier, json:true });
     return data.json;
   };
   return call;
@@ -828,7 +834,7 @@ Balas HANYA objek JSON-nya, tanpa markdown fence, tanpa komentar tambahan.`;
       education:Array.isArray(data.education)?data.education:[], experience:Array.isArray(data.experience)?data.experience:[],
       skills:Array.isArray(data.skills)?data.skills:[], certifications:Array.isArray(data.certifications)?data.certifications:[],
       languages:Array.isArray(data.languages)?data.languages:[], totalYearsExperience: typeof data.totalYearsExperience==='number'?data.totalYearsExperience:null };
-  }catch(e){ console.warn('Ekstraksi CV via AI gagal, memakai fallback', e); return fallbackExtractCV(cvText); }
+  }catch(e){ console.warn('Ekstraksi CV via AI gagal, memakai fallback', e); toast(`AI CV gagal: ${e.message||'error tidak diketahui'}`, 'error'); return fallbackExtractCV(cvText); }
 }
 
 async function aiScoreCandidate(cvData, job){
@@ -877,7 +883,7 @@ Balas HANYA objek JSON-nya.`;
       cvEvidence:Array.isArray(data.cvEvidence)?data.cvEvidence:[], strengths:Array.isArray(data.strengths)?data.strengths:[],
       relevantExperience:Array.isArray(data.relevantExperience)?data.relevantExperience:[], cvGaps:Array.isArray(data.cvGaps)?data.cvGaps:[],
       recommendedInterviewQuestions:Array.isArray(data.recommendedInterviewQuestions)?data.recommendedInterviewQuestions:[] };
-  }catch(e){ console.warn('Penilaian AI gagal, memakai fallback', e); return fallbackScore(cvData, job); }
+  }catch(e){ console.warn('Penilaian AI gagal, memakai fallback', e); toast(`AI screening gagal: ${e.message||'error tidak diketahui'}`, 'error'); return fallbackScore(cvData, job); }
 }
 function clamp100(n){ n = Number(n); if(isNaN(n)) return 50; return Math.max(0, Math.min(100, Math.round(n))); }
 
@@ -1863,7 +1869,7 @@ async function startScreening(){
   }catch(e){
     clearInterval(stepTimer);
     console.error(e);
-    box.innerHTML = `<div class="flex items-start gap-2 text-coral-600 text-sm font-semibold bg-coral-50 border border-coral-200 rounded-2xl p-3">${icon('alert','w-4 h-4 shrink-0 mt-0.5')} <span>Terjadi kesalahan saat menganalisis CV ini. Silakan coba lagi.</span></div>`;
+    box.innerHTML = `<div class="flex items-start gap-2 text-coral-600 text-sm font-semibold bg-coral-50 border border-coral-200 rounded-2xl p-3">${icon('alert','w-4 h-4 shrink-0 mt-0.5')} <span>Analisis AI gagal: ${esc(e.message||'error tidak diketahui')}. Silakan coba lagi.</span></div>`;
     document.querySelector('button[onclick="startScreening()"]').disabled = false;
   }
 }

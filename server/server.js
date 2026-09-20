@@ -39,7 +39,7 @@ const cors = require('cors');
 const PORT = process.env.PORT || 8787;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const AI_API_KEY = process.env.AI_API_KEY || '';
-const AI_MODEL = process.env.AI_MODEL || 'gpt-5.6-luna';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-5-mini';
 const AUTH_SECRET = process.env.AUTH_SECRET || '';
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -134,9 +134,12 @@ app.post('/api/ai', async (req, res) => {
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
   const model = AI_MODEL;
   try {
+    const inputText = json && !/\bjson\b/i.test(String(prompt))
+      ? `Return the result as valid JSON.\n\n${String(prompt)}`
+      : String(prompt);
     const requestBody = {
       model,
-      input: [{ role: 'user', content: [{ type: 'input_text', text: String(prompt) }] }],
+      input: [{ role: 'user', content: [{ type: 'input_text', text: inputText }] }],
       max_output_tokens: 2000,
     };
     if (json) requestBody.text = { format: { type: 'json_object' } };
@@ -151,7 +154,12 @@ app.post('/api/ai', async (req, res) => {
     });
     if (!r.ok) {
       const errText = await r.text();
-      return res.status(502).json({ error: 'AI provider error', detail: errText });
+      let detail = errText;
+      try {
+        const providerError = JSON.parse(errText);
+        detail = providerError.error?.message || providerError.error || errText;
+      } catch (e) {}
+      return res.status(502).json({ error: 'AI provider error', detail: String(detail) });
     }
     const data = await r.json();
     const text = data.output_text || (data.output || [])
@@ -169,7 +177,7 @@ app.post('/api/ai', async (req, res) => {
     }
     res.json({ text });
   } catch (e) {
-    res.status(502).json({ error: 'AI request failed', detail: String(e) });
+    res.status(502).json({ error: 'AI request failed', detail: e?.message || String(e) });
   }
 });
 
