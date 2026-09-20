@@ -443,7 +443,7 @@ async function ensureNonDestructiveUpgradesV3(){
   let done = false;
   if(dbAvailable){ try{ done = (await dbApi.doc('meta/upgradeV3').get()).exists; }catch(e){} }
   else { done = !!MEM.__upgradeV3; }
-  if(done) return;
+  if(done){ await ensureNonDestructiveUpgradesV4(); return; }
   for(const c of candArr()){
     const patched = {
       ...c,
@@ -459,6 +459,23 @@ async function ensureNonDestructiveUpgradesV3(){
   }
   if(dbAvailable){ try{ await dbApi.doc('meta/upgradeV3').set({done:true, at:Date.now()}); }catch(e){} }
   else { MEM.__upgradeV3 = true; }
+  await ensureNonDestructiveUpgradesV4();
+}
+
+async function ensureNonDestructiveUpgradesV4(){
+  let done = false;
+  if(dbAvailable){ try{ done = (await dbApi.doc('meta/upgradeV4').get()).exists; }catch(e){} }
+  else { done = !!MEM.__upgradeV4; }
+  if(done) return;
+  for(const c of candArr()){
+    const currentName = c.displayName || c.name;
+    if(isUsableCandidateName(currentName)) continue;
+    const extractedName = isUsableCandidateName(c.cvData?.fullName) ? c.cvData.fullName : extractCandidateNameFromText(c.cvText||'');
+    if(!isUsableCandidateName(extractedName)) continue;
+    await docSet('candidates', c.id, { ...c, name:extractedName, displayName:extractedName, nameSource:'cv', nameConfidence:'fallback', lastActivityAt:Date.now() });
+  }
+  if(dbAvailable){ try{ await dbApi.doc('meta/upgradeV4').set({done:true, at:Date.now()}); }catch(e){} }
+  else { MEM.__upgradeV4 = true; }
 }
 
 
