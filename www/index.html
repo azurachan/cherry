@@ -1937,7 +1937,7 @@ function viewCandidate(id, tab){
     ${tab==='timeline'?tabTimeline(c):''}
   </div>`;
 }
-function buildCandidateInsight(c){
+function buildCandidateInsight(c, job){
   const scores = [];
   if(c.screening) scores.push({label:'CV Assessment', score:c.screening.overallScore});
   if(c.testCam?.score!=null) scores.push({label:'Test Cam Assessment', score:c.testCam.score});
@@ -1950,34 +1950,125 @@ function buildCandidateInsight(c){
   const strengths = [...(c.screening?.strengths||[]), ...(c.interview?.analysis?.strengths||[]), ...(c.testCam?.observedStrengths||[])];
   const concerns = [...(c.screening?.concerns||[]), ...(c.interview?.analysis?.concerns||[]), ...(c.testCam?.observedWeaknesses||[])];
   const followUp = [...(c.screening?.recommendedInterviewQuestions||[]), ...(c.interview?.analysis?.followUpQuestions||[]), ...(c.testCam?.recruiterFollowUp||[])];
-  return { overallFit, scores, strengths:[...new Set(strengths)].slice(0,8), areasToVerify:[...new Set(missing.concat(c.screening?.missingInfo||[]))].slice(0,8), missingEvidence:missing, potentialConcerns:[...new Set(concerns)].slice(0,8), recruiterFollowUp:[...new Set(followUp)].slice(0,8), finalSummary:overallFit==null?'Insufficient evidence':'Ringkasan ini hanya menggunakan bukti CV, Test Cam, dan Interview yang tersedia.' };
+  return { overallFit, scores, strengths:[...new Set(strengths)].slice(0,8), areasToVerify:[...new Set(missing.concat(c.screening?.missingInfo||[]))].slice(0,8), missingEvidence:missing, potentialConcerns:[...new Set(concerns)].slice(0,8), recruiterFollowUp:[...new Set(followUp)].slice(0,8), finalSummary:overallFit==null?'Insufficient evidence':'Ringkasan awal dari evidence yang tersimpan. Jalankan analisis AI untuk Candidate Insight lengkap.', aiStatus:'not_analyzed' };
+}
+function candidateInsightPayload(c, job){
+  return { candidateName:candidateDisplayName(c), vacancy:{name:job?.name||'Belum ada posisi', description:job?.description||'', requirements:job?.requiredSkills||[], preferredSkills:job?.preferredSkills||[], schedule:job?.workingSchedule||'', location:job?.location||'', compensation:{min:job?.salaryMin||null,max:job?.salaryMax||null}}, stage:c.stage||'Belum ada tahap', cvText:c.cvText||'', cvData:c.cvData||{}, cvScreening:c.screening||null, testCam:c.testCam||null, interview:c.interview||null, background:c.background||'', recruiterNotes:(c.notes||[]).map(n=>n.text).join('\n'), screeningNotes:c.screening?.recruiterNotes||'' };
+}
+async function aiAnalyzeCandidateInsight(c, job){
+  const prompt = `Anda adalah asisten recruiter berbasis evidence. Analisis kandidat berikut hanya dari data yang disediakan. Jangan menyimpulkan kepribadian, loyalitas, kesehatan mental, kecerdasan, karakter, attractiveness, atau prediksi retensi/masa kerja. Jangan membuat keputusan hire/reject. Bedakan evidence eksplisit, informasi yang hilang, dan hal yang perlu diverifikasi. Jika tidak tersedia, tulis "Belum ada informasi.". Untuk perbedaan sumber gunakan bahasa netral: "Informasi berbeda dan perlu dikonfirmasi.".
+
+${AI_LANG_RULE}
+
+DATA KANDIDAT:
+${JSON.stringify(candidateInsightPayload(c, job))}
+
+Balas HANYA JSON dengan key:
+{"overallFit": number|null (rata-rata evidence assessment yang tersedia, null jika tidak cukup),
+"candidateOverview": string, "workHistoryPattern": {"relevantRoleCount": number|null,"relevantExperience": string[],"durationEvidence": string[],"careerProgression": string[],"employmentGaps": string[],"shortRolePatterns": string[],"workPatternEvidence": string[]},
+"roleAlignment": {"relevantExperience": string[],"relevantSkills": string[],"evidence": string[],"missingRequirements": string[],"needsVerification": string[]},
+"workExpectationsAvailability": {"availability": string,"startDate": string,"schedule": string,"shiftAvailability": string,"locationArrangement": string,"compensation": string,"otherRequirements": string[]},
+"longTermFitEvidence": string[], "stillToConfirm": string[], "strengths": string[], "areasToVerify": string[], "potentialConcerns": string[], "recruiterFollowUp": string[], "finalSummary": string}
+Jangan isi field dengan tebakan. Jangan menyebut retention probability. Pastikan pertanyaan follow-up spesifik terhadap vacancy dan evidence kandidat.`;
+  const data = await sampleApi.json(prompt, {modelTier:'quick', cache:false});
+  const scores=[];
+  if(c.screening) scores.push({label:'CV Assessment',score:c.screening.overallScore});
+  if(c.testCam?.score!=null) scores.push({label:'Test Cam Assessment',score:c.testCam.score});
+  if(c.interview?.analysis) scores.push({label:'Interview Assessment',score:c.interview.analysis.overallScore});
+  return {...data, scores, overallFit:data.overallFit==null?(scores.length?Math.round(scores.reduce((sum,item)=>sum+item.score,0)/scores.length):null):data.overallFit, aiStatus:'analyzed', analyzedAt:Date.now()};
 }
 function tabCandidateInsight(c, job){
-  const i = c.insight || buildCandidateInsight(c);
+  const i = c.insight || buildCandidateInsight(c, job);
+  const chat = c.chatAnalysis;
   return `<div class="space-y-5">
     <div class="card rounded-3xl p-6 shadow-softer flex flex-wrap items-center justify-between gap-4">
       <div><h2 class="font-display font-bold text-lg">CANDIDATE INSIGHT</h2><p class="text-sm text-muted">Asisten recruiter berbasis evidence, bukan keputusan otomatis.</p></div>
       <div class="text-center"><p class="text-xs text-muted font-bold">Overall Fit</p><p class="font-display text-3xl font-extrabold">${i.overallFit==null?'Insufficient evidence':i.overallFit+'%'}</p></div>
-      <button onclick="generateCandidateInsight('${c.id}')" class="px-4 py-2.5 rounded-xl bg-ink-900 text-white text-sm font-bold">${c.insight?'Perbarui Insight':'Buat Insight'}</button>
+      <button id="insightBtn_${c.id}" onclick="generateCandidateInsight('${c.id}')" class="px-4 py-2.5 rounded-xl bg-ink-900 text-white text-sm font-bold">${c.insight?'Perbarui Insight AI':'Analisis Candidate Insight'}</button>
     </div>
-    <div class="grid md:grid-cols-3 gap-5">${i.scores.map(s=>`<div class="card rounded-3xl p-5 shadow-softer"><p class="text-xs text-muted font-bold">${esc(s.label)}</p><p class="font-display text-2xl font-extrabold mt-1">${s.score}%</p></div>`).join('') || `<div class="card rounded-3xl p-5 shadow-softer text-sm text-muted md:col-span-3">Insufficient evidence</div>`}</div>
+    ${c.insight?.aiStatus==='analyzed'?`<div class="card rounded-3xl p-6 shadow-softer"><h3 class="font-bold text-sm mb-2">Candidate Overview</h3><p class="text-sm text-ink-700">${esc(i.candidateOverview||i.finalSummary||'Belum ada informasi.')}</p><p class="text-xs text-muted mt-2">${esc(candidateDisplayName(c))} · ${esc(job?.name||'Belum ada posisi')} · ${esc(stageLabel(c.stage))}</p></div>`:''}
+    <div class="grid md:grid-cols-3 gap-5">${(i.scores||[]).map(s=>`<div class="card rounded-3xl p-5 shadow-softer"><p class="text-xs text-muted font-bold">${esc(s.label)}</p><p class="font-display text-2xl font-extrabold mt-1">${s.score}%</p></div>`).join('') || `<div class="card rounded-3xl p-5 shadow-softer text-sm text-muted md:col-span-3">Insufficient evidence</div>`}</div>
     <div class="grid md:grid-cols-2 gap-5">
       ${insightListCard('Strengths',i.strengths,'text-mint-500')}
       ${insightListCard('Areas to Verify',i.areasToVerify,'text-sunny-600')}
       ${insightListCard('Missing Evidence',i.missingEvidence,'text-sky-500')}
       ${insightListCard('Potential Concerns',i.potentialConcerns,'text-coral-600')}
     </div>
+    ${c.insight?.aiStatus==='analyzed'?insightDetailCards(i):''}
     ${insightListCard('Recruiter Follow-up',i.recruiterFollowUp,'text-lav-500')}
     <div class="card rounded-3xl p-6 shadow-softer"><h3 class="font-bold text-sm mb-2">Final Summary</h3><p class="text-sm text-ink-700">${esc(i.finalSummary||'Insufficient evidence')}</p></div>
+    ${chatAnalysisView(c, job, chat)}
+  </div>`;
+}
+function insightDetailCards(i){
+  const h = i.workHistoryPattern||{}; const r=i.roleAlignment||{}; const w=i.workExpectationsAvailability||{};
+  return `<div class="grid md:grid-cols-2 gap-5">
+    ${insightListCard('Work History Pattern',[`Relevant roles: ${h.relevantRoleCount??'Belum ada informasi.'}`,...(h.relevantExperience||[]),...(h.durationEvidence||[]),...(h.careerProgression||[]),...(h.employmentGaps||[]),...(h.shortRolePatterns||[])],'text-coral-600')}
+    ${insightListCard('Role Alignment',[...(r.relevantExperience||[]),...(r.relevantSkills||[]),...(r.evidence||[]),...(r.missingRequirements||[]),...(r.needsVerification||[])],'text-lav-500')}
+    ${insightListCard('Work Expectations / Availability',[`Availability: ${w.availability||'Belum ada informasi.'}`,`Start date: ${w.startDate||'Belum ada informasi.'}`,`Schedule: ${w.schedule||'Belum ada informasi.'}`,`Shift: ${w.shiftAvailability||'Belum ada informasi.'}`,`Location: ${w.locationArrangement||'Belum ada informasi.'}`,`Compensation: ${w.compensation||'Belum ada informasi.'}`,...(w.otherRequirements||[])],'text-sky-500')}
+    ${insightListCard('Evidence yang dapat membantu recruiter menilai kecocokan jangka panjang',i.longTermFitEvidence,'text-mint-500')}
+    ${insightListCard('Hal yang masih perlu dikonfirmasi',i.stillToConfirm,'text-sunny-600')}
   </div>`;
 }
 function insightListCard(title, items, color){
   return `<div class="card rounded-3xl p-6 shadow-softer"><h3 class="font-bold text-sm mb-2 ${color}">${title}</h3>${items?.length?`<ul class="text-sm text-ink-700 space-y-1.5 list-disc ml-4">${items.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:`<p class="text-sm text-muted">Insufficient evidence</p>`}</div>`;
 }
+function chatAnalysisView(c, job, chat){
+  return `<div class="card rounded-3xl p-6 shadow-softer">
+    <div class="flex items-center justify-between gap-3 mb-2"><div><h3 class="font-display font-bold">Analisis Chat</h3><p class="text-xs text-muted">Analisis hanya mencakup informasi kerja yang tertulis di percakapan.</p></div><button id="chatBtn_${c.id}" onclick="analyzeCandidateChat('${c.id}')" class="px-4 py-2.5 rounded-xl bg-lav-500 text-white text-sm font-bold">${chat?'Perbarui Analisis':'Analisis Chat'}</button></div>
+    <textarea id="candidateChat_${c.id}" rows="7" placeholder="Tempel chat recruiter dan kandidat di sini..." class="w-full rounded-xl border border-app px-3.5 py-2.5 text-sm">${esc(c.chatText||'')}</textarea>
+    <div id="chatError_${c.id}" class="hidden mt-3 text-sm text-coral-600 bg-coral-50 border border-coral-200 rounded-xl p-3"></div>
+    ${chat?`<div class="grid md:grid-cols-2 gap-5 mt-5">
+      ${insightListCard('Communication',chat.communication,'text-coral-600')}
+      ${insightListCard('Role Understanding',chat.roleUnderstanding,'text-lav-500')}
+      ${insightListCard('Expectations',chat.expectations,'text-sky-500')}
+      ${insightListCard('Consistency',chat.consistency,'text-sunny-600')}
+      ${insightListCard('Motivation Evidence',chat.motivationEvidence,'text-mint-500')}
+      ${insightListCard('Follow-up Questions',chat.followUpQuestions,'text-lav-500')}
+    </div>`:''}
+    ${chat?insightListCard('Cross-Check Kandidat',[...(chat.crossCheck?.consistent||[]).map(x=>'✓ '+x),...(chat.crossCheck?.differences||[]).map(x=>'⚠ '+x),...(chat.crossCheck?.missing||[]).map(x=>'? '+x)],'text-ink-600'):''}
+  </div>`;
+}
+async function aiAnalyzeCandidateChat(c, job, chatText){
+  const prompt = `Anda adalah asisten recruiter berbasis evidence. Analisis transkrip chat berikut hanya untuk informasi terkait pekerjaan. Jangan mendiagnosis kepribadian/mental state, jangan menilai gaya menulis sebagai motivasi, jangan menuduh berbohong, dan jangan menyimpulkan protected traits. Gunakan "Informasi berbeda dan perlu dikonfirmasi" bila sumber berbeda. Gunakan "Belum ada informasi." bila tidak tersedia.
+
+${AI_LANG_RULE}
+
+VACANCY: ${JSON.stringify({name:job?.name||'',description:job?.description||'',requirements:job?.requiredSkills||[],schedule:job?.workingSchedule||'',location:job?.location||'',salaryMin:job?.salaryMin||null,salaryMax:job?.salaryMax||null})}
+CANDIDATE DATA: ${JSON.stringify(candidateInsightPayload(c,job))}
+CHAT TRANSCRIPT:
+${chatText}
+
+Balas HANYA JSON:
+{"communication": string[],"roleUnderstanding": string[],"expectations": string[],"consistency": string[],"motivationEvidence": string[],"crossCheck":{"consistent":string[],"differences":string[],"missing":string[]},"followUpQuestions":string[],"summary":string}
+Analisis jawaban aktual saja dan jangan mengarang fakta.`;
+  return await sampleApi.json(prompt,{modelTier:'quick',cache:false});
+}
+async function analyzeCandidateChat(id){
+  const c=getCand(id); if(!c) return;
+  const job=getJob(c.jobId); const input=document.getElementById('candidateChat_'+id); const chatText=(input?.value||'').trim();
+  const errorBox=document.getElementById('chatError_'+id); const btn=document.getElementById('chatBtn_'+id);
+  if(!chatText){ if(errorBox){errorBox.textContent='Tempel chat terlebih dahulu.';errorBox.classList.remove('hidden');} return; }
+  if(btn){btn.disabled=true;btn.textContent='Menganalisis...';} if(errorBox) errorBox.classList.add('hidden');
+  try{
+    if(!aiAvailable) throw new Error('AI tidak tersedia.');
+    const analysis=await aiAnalyzeCandidateChat(c,job,chatText);
+    c.chatText=chatText; c.chatAnalysis={...analysis,analyzedAt:Date.now()}; c.lastActivityAt=Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Analisis Chat diperbarui',date:Date.now()});
+    await docSet('candidates',id,c); toast('Analisis Chat selesai.','success'); render();
+  }catch(e){
+    if(btn){btn.disabled=false;btn.textContent='Coba Lagi';}
+    if(errorBox){errorBox.textContent='Analisis Chat gagal: '+(e.message||'error tidak diketahui');errorBox.classList.remove('hidden');}
+  }
+}
 async function generateCandidateInsight(id){
   const c = getCand(id); if(!c) return;
-  c.insight = buildCandidateInsight(c); c.lastActivityAt = Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Candidate Insight diperbarui',date:Date.now()});
-  await docSet('candidates', id, c); toast('Candidate Insight diperbarui.','success'); render();
+  const job = getJob(c.jobId); const btn=document.getElementById('insightBtn_'+id);
+  if(btn){ btn.disabled=true; btn.textContent='Menganalisis...'; }
+  try{
+    if(!aiAvailable) throw new Error('AI tidak tersedia.');
+    c.insight = await aiAnalyzeCandidateInsight(c, job); c.lastActivityAt = Date.now(); c.timeline=c.timeline||[]; c.timeline.push({event:'Candidate Insight AI diperbarui',date:Date.now()});
+    await docSet('candidates', id, c); toast('Candidate Insight diperbarui.','success'); render();
+  }catch(e){ if(btn){btn.disabled=false;btn.textContent='Coba Lagi';} toast('Candidate Insight gagal: '+(e.message||'error tidak diketahui'),'error'); }
 }
 async function moveStage(id, stage){
   const c = getCand(id); c.stage = stage; c.timeline = c.timeline||[]; c.timeline.push({event:'Dipindahkan ke '+stageLabel(stage), date:Date.now()});

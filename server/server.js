@@ -184,7 +184,7 @@ app.post('/api/ai', async (req, res) => {
       : String(prompt);
     const requestBody = {
       contents: [{ role: 'user', parts: [{ text: inputText }] }],
-      generationConfig: { maxOutputTokens: 2000 },
+      generationConfig: { maxOutputTokens: 4000 },
     };
     if (json) requestBody.generationConfig.responseMimeType = 'application/json';
 
