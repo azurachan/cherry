@@ -7,7 +7,7 @@
  * on any normal HTTPS domain.
  *
  * Only 2 npm dependencies: express, cors. Everything else (env
- * loading, JSON file storage, the Anthropic API call) uses Node's
+ * loading, JSON file storage, the OpenAI API call) uses Node's
  * built-ins (Node 18+ has global fetch).
  *
  * THIS FILE WAS WRITTEN BUT NOT RUN in the environment that produced
@@ -38,7 +38,8 @@ const cors = require('cors');
 
 const PORT = process.env.PORT || 8787;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
-const AI_API_KEY = process.env.AI_API_KEY || process.env.ANTHROPIC_API_KEY || '';
+const AI_API_KEY = process.env.AI_API_KEY || '';
+const AI_MODEL = process.env.AI_MODEL || 'gpt-5.6-luna';
 const AUTH_SECRET = process.env.AUTH_SECRET || '';
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -124,34 +125,40 @@ app.post('/api/db/:collection/:id/acquire', (req, res) => {
 });
 
 // ---------------------------- AI ROUTE ----------------------------
-// Server-side Claude proxy — the front-end NEVER sees AI_API_KEY.
+// Server-side OpenAI proxy — the front-end NEVER sees AI_API_KEY.
 app.post('/api/ai', async (req, res) => {
   if (!AI_API_KEY) {
     return res.status(500).json({ error: 'AI_API_KEY is not configured on the server (.env)' });
   }
   const { prompt, json, modelTier } = req.body || {};
   if (!prompt) return res.status(400).json({ error: 'prompt is required' });
-  const model = modelTier === 'quick' ? 'claude-haiku-4-5-20251001' : 'claude-sonnet-4-6';
+  const model = AI_MODEL;
   try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const requestBody = {
+      model,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: String(prompt) }] }],
+      max_output_tokens: 2000,
+    };
+    if (json) requestBody.text = { format: { type: 'json_object' } };
+
+    const r = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-api-key': AI_API_KEY,
-        'anthropic-version': '2023-06-01',
+        Authorization: `Bearer ${AI_API_KEY}`,
       },
-      body: JSON.stringify({
-        model,
-        max_tokens: 2000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
+      body: JSON.stringify(requestBody),
     });
     if (!r.ok) {
       const errText = await r.text();
       return res.status(502).json({ error: 'AI provider error', detail: errText });
     }
     const data = await r.json();
-    const text = (data.content || []).map(b => b.text || '').join('\n');
+    const text = data.output_text || (data.output || [])
+      .flatMap(item => item.content || [])
+      .map(content => content.text || '')
+      .join('\n');
+    if (!text) return res.status(502).json({ error: 'AI returned an empty response' });
     if (json) {
       try {
         const cleaned = text.replace(/```json|```/g, '').trim();
